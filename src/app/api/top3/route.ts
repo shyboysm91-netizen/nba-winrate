@@ -108,23 +108,13 @@ function parseMs(iso: string | null | undefined): number | null {
   return Number.isFinite(t) ? t : null;
 }
 
+/** ✅ 타입 안전: g에는 home/away만 존재 (homeTeam/awayTeam 접근 금지) */
 function extractTeamsFromEspnGame(g: any): { home: string; away: string } {
   const triHome = String(g?.home?.triCode ?? "").toUpperCase();
   const triAway = String(g?.away?.triCode ?? "").toUpperCase();
 
-  const homeName =
-    g?.home?.name ||
-    g?.homeTeam?.displayName ||
-    g?.homeTeam?.name ||
-    TRI_TO_TEAM[triHome] ||
-    (triHome ? triHome : "");
-
-  const awayName =
-    g?.away?.name ||
-    g?.awayTeam?.displayName ||
-    g?.awayTeam?.name ||
-    TRI_TO_TEAM[triAway] ||
-    (triAway ? triAway : "");
+  const homeName = g?.home?.name || TRI_TO_TEAM[triHome] || (triHome ? triHome : "");
+  const awayName = g?.away?.name || TRI_TO_TEAM[triAway] || (triAway ? triAway : "");
 
   return { home: homeName, away: awayName };
 }
@@ -243,8 +233,9 @@ export async function GET(req: Request) {
     const total: any[] = [];
 
     for (const g of games) {
-      const homeTeamId = String(g?.home?.teamId ?? g?.home?.id ?? "");
-      const awayTeamId = String(g?.away?.teamId ?? g?.away?.id ?? "");
+      // ✅ 타입 에러 방지: id 접근 금지 (teamId만 사용)
+      const homeTeamId = String(g?.home?.teamId ?? "");
+      const awayTeamId = String(g?.away?.teamId ?? "");
       if (!homeTeamId || !awayTeamId) continue;
 
       const triHome = String(g?.home?.triCode ?? "").toUpperCase();
