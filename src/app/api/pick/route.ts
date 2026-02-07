@@ -98,15 +98,11 @@ function parseMs(iso: string | null | undefined): number | null {
 function extractTeamsFromEspnGame(g: any): { home: string; away: string } {
   const homeName =
     g?.home?.name ||
-    g?.homeTeam?.displayName ||
-    g?.homeTeam?.name ||
     TRI_TO_TEAM[String(g?.home?.triCode ?? "").toUpperCase()] ||
     String(g?.home?.triCode ?? "");
 
   const awayName =
     g?.away?.name ||
-    g?.awayTeam?.displayName ||
-    g?.awayTeam?.name ||
     TRI_TO_TEAM[String(g?.away?.triCode ?? "").toUpperCase()] ||
     String(g?.away?.triCode ?? "");
 
@@ -201,7 +197,10 @@ export async function GET(req: Request) {
     }
 
     if (!user) {
-      return NextResponse.json<ApiResp>({ ok: false, error: "로그인이 필요합니다." }, { status: 401 });
+      return NextResponse.json<ApiResp>(
+        { ok: false, error: "로그인이 필요합니다." },
+        { status: 401 }
+      );
     }
 
     // ✅ subscriptions + daily_usage를 "유저 세션"으로 처리 (서비스 키 사용 X)
@@ -288,15 +287,19 @@ export async function GET(req: Request) {
       );
     }
 
-    // ✅ 타입 에러 방지: home/away에 id 접근 금지 (teamId + homeTeam/awayTeam 쪽만 fallback)
-    const homeTeamId = String(g?.home?.teamId ?? g?.homeTeam?.id ?? g?.homeTeam?.teamId ?? "");
-    const awayTeamId = String(g?.away?.teamId ?? g?.awayTeam?.id ?? g?.awayTeam?.teamId ?? "");
+    // ✅ 타입 확정: g에는 home/away만 존재 (homeTeam/awayTeam 없음)
+    const homeTeamId = String(g?.home?.teamId ?? "");
+    const awayTeamId = String(g?.away?.teamId ?? "");
 
     const triHome = String(g?.home?.triCode ?? "").toUpperCase();
     const triAway = String(g?.away?.triCode ?? "").toUpperCase();
 
-    const homeName = g?.home?.name ?? TRI_TO_TEAM[triHome] ?? (triHome ? triHome : null);
-    const awayName = g?.away?.name ?? TRI_TO_TEAM[triAway] ?? (triAway ? triAway : null);
+    const homeName = (g?.home?.name ?? TRI_TO_TEAM[triHome] ?? (triHome ? triHome : null)) as
+      | string
+      | null;
+    const awayName = (g?.away?.name ?? TRI_TO_TEAM[triAway] ?? (triAway ? triAway : null)) as
+      | string
+      | null;
 
     const conf0 = baseConfidence((games || []).length);
 
