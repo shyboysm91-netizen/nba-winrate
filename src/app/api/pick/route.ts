@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
-import { createRouteHandlerClient } from "@supabase/auth-helpers-nextjs";
-import { createClient } from "@supabase/supabase-js";
+import { createServerClient } from "@supabase/ssr";
 
 import { fetchNBAGamesByKstDate } from "@/lib/nba/espn";
 import { fetchNbaOdds, type NormalizedOdds } from "@/lib/odds/theOddsApi";
@@ -157,28 +156,67 @@ function pickClosestEvent(
   return best;
 }
 
+async function getSupabaseAuthClient() {
+  const cookieStore = await cookies();
+
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+
+  if (!url || !anon) {
+    throw new Error("Missing NEXT_PUBLIC_SUPABASE_URL or NEXT_PUBLIC_SUPABASE_ANON_KEY");
+  }
+
+  return createServerClient(url, anon, {
+    cookies: {
+      getAll() {
+        const anyStore: any = cookieStore as any;
+        if (typeof anyStore.getAll === "function") {
+          return anyStore.getAll().map((c: any) => ({ name: c.name, value: c.value }));
+        }
+        return [];
+      },
+      setAll(cookiesToSet) {
+        const anyStore: any = cookieStore as any;
+        if (typeof anyStore.set === "function") {
+          cookiesToSet.forEach(({ name, value, options }) => {
+            anyStore.set(name, value, options);
+          });
+        }
+      },
+    },
+  });
+}
+
 export async function GET(req: Request) {
   try {
     // ✅ 로그인 필수
-    const supabaseAuth = createRouteHandlerClient({ cookies });
+    const supabaseAuth = await getSupabaseAuthClient();
     const {
       data: { user },
+      error: userErr,
     } = await supabaseAuth.auth.getUser();
+
+    if (userErr) {
+      return NextResponse.json<ApiResp>({ ok: false, error: userErr.message }, { status: 401 });
+    }
 
     if (!user) {
       return NextResponse.json<ApiResp>({ ok: false, error: "로그인이 필요합니다." }, { status: 401 });
     }
 
-    // ✅ 서비스 롤로 subscriptions + daily_usage 체크
-    const url = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-    const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY!;
-    const admin = createClient(url, serviceKey, { auth: { persistSession: false } });
-
-    const { data: sub } = await admin
+    // ✅ subscriptions + daily_usage를 "유저 세션"으로 처리 (서비스 키 사용 X)
+    const { data: sub, error: subErr } = await supabaseAuth
       .from("subscriptions")
       .select("*")
       .eq("user_id", user.id)
       .maybeSingle();
+
+    if (subErr) {
+      return NextResponse.json<ApiResp>(
+        { ok: false, error: `subscriptions 조회 실패: ${subErr.message}` },
+        { status: 500 }
+      );
+    }
 
     const isPro = isProRow(sub);
 
@@ -186,12 +224,19 @@ export async function GET(req: Request) {
     if (!isPro) {
       const dateKey = kstDateKeyNow();
 
-      const { data: usage } = await admin
+      const { data: usage, error: usageErr } = await supabaseAuth
         .from("daily_usage")
         .select("pick_count")
         .eq("user_id", user.id)
         .eq("date_key", dateKey)
         .maybeSingle();
+
+      if (usageErr) {
+        return NextResponse.json<ApiResp>(
+          { ok: false, error: `usage 조회 실패: ${usageErr.message}` },
+          { status: 500 }
+        );
+      }
 
       const used = (usage?.pick_count ?? 0) >= 1;
       if (used) {
@@ -202,7 +247,8 @@ export async function GET(req: Request) {
       }
 
       const nextCount = (usage?.pick_count ?? 0) + 1;
-      const { error: upsertErr } = await admin.from("daily_usage").upsert(
+
+      const { error: upsertErr } = await supabaseAuth.from("daily_usage").upsert(
         {
           user_id: user.id,
           date_key: dateKey,
@@ -213,7 +259,10 @@ export async function GET(req: Request) {
       );
 
       if (upsertErr) {
-        return NextResponse.json<ApiResp>({ ok: false, error: "usage 저장 실패" }, { status: 500 });
+        return NextResponse.json<ApiResp>(
+          { ok: false, error: `usage 저장 실패: ${upsertErr.message}` },
+          { status: 500 }
+        );
       }
     }
 
@@ -239,8 +288,9 @@ export async function GET(req: Request) {
       );
     }
 
-    const homeTeamId = String(g?.home?.teamId ?? g?.home?.id ?? "");
-    const awayTeamId = String(g?.away?.teamId ?? g?.away?.id ?? "");
+    // ✅ 타입 에러 방지: home/away에 id 접근 금지 (teamId + homeTeam/awayTeam 쪽만 fallback)
+    const homeTeamId = String(g?.home?.teamId ?? g?.homeTeam?.id ?? g?.homeTeam?.teamId ?? "");
+    const awayTeamId = String(g?.away?.teamId ?? g?.awayTeam?.id ?? g?.awayTeam?.teamId ?? "");
 
     const triHome = String(g?.home?.triCode ?? "").toUpperCase();
     const triAway = String(g?.away?.triCode ?? "").toUpperCase();
@@ -348,9 +398,9 @@ export async function GET(req: Request) {
       result: {
         date: dateKst,
         gameId,
-        spreadHome: marketSpreadHome, // 실제 시장 라인(없으면 null)
-        total: marketTotal, // 실제 시장 라인(없으면 null)
-        provider: marketProvider, // (없으면 null)
+        spreadHome: marketSpreadHome,
+        total: marketTotal,
+        provider: marketProvider,
         picks,
       },
     });
