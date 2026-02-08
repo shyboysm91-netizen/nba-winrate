@@ -29,15 +29,16 @@ export async function recommendTop3(dateYYYYMMDD?: string) {
   const candidates: TopPick[] = [];
 
   for (const g of games) {
-    if (!g?.home?.id || !g?.away?.id) continue;
+    // ✅ id 없음 → teamId만 사용
+    if (!g?.home?.teamId || !g?.away?.teamId) continue;
 
     const spreadHome =
       typeof g?.odds?.spreadHome === "number" ? g.odds.spreadHome : undefined;
     const total = typeof g?.odds?.total === "number" ? g.odds.total : undefined;
 
     const analysis = await analyzeGame({
-      homeTeamId: g.home.id,
-      awayTeamId: g.away.id,
+      homeTeamId: g.home.teamId,
+      awayTeamId: g.away.teamId,
       spreadHome,
       total,
     });
