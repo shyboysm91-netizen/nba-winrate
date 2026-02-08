@@ -32,9 +32,11 @@ export async function recommendTop3(dateYYYYMMDD?: string) {
     // ✅ id 없음 → teamId만 사용
     if (!g?.home?.teamId || !g?.away?.teamId) continue;
 
-    const spreadHome =
-      typeof g?.odds?.spreadHome === "number" ? g.odds.spreadHome : undefined;
-    const total = typeof g?.odds?.total === "number" ? g.odds.total : undefined;
+    // ✅ scoreboard 타입에는 odds가 없음 (타입 에러 방지)
+    // 라인 기반 추천은 api/top3에서 odds 매칭 후 처리하는 구조
+    const spreadHome: number | undefined = undefined;
+    const total: number | undefined = undefined;
+    const provider: string | null = null;
 
     const analysis = await analyzeGame({
       homeTeamId: g.home.teamId,
@@ -43,7 +45,7 @@ export async function recommendTop3(dateYYYYMMDD?: string) {
       total,
     });
 
-    const matchup = `${g.away.abbr || g.away.name} @ ${g.home.abbr || g.home.name}`;
+    const matchup = `${g.away.triCode || g.away.name} @ ${g.home.triCode || g.home.name}`;
 
     if (analysis.picks.ml) {
       addIf(candidates, {
@@ -56,6 +58,7 @@ export async function recommendTop3(dateYYYYMMDD?: string) {
       });
     }
 
+    // spread/total은 라인이 없으면 생성되지 않도록 analyzeGame이 이미 막고 있음
     if (analysis.picks.spread && typeof spreadHome === "number") {
       addIf(candidates, {
         type: "SPREAD",
@@ -64,7 +67,7 @@ export async function recommendTop3(dateYYYYMMDD?: string) {
         pick: `${analysis.picks.spread.pick} (home line ${spreadHome})`,
         confidence: analysis.picks.spread.confidence,
         reason: analysis.picks.spread.reason,
-        line: { spreadHome, provider: g?.odds?.provider ?? null },
+        line: { spreadHome, provider },
       });
     }
 
@@ -76,7 +79,7 @@ export async function recommendTop3(dateYYYYMMDD?: string) {
         pick: `${analysis.picks.total.pick} (O/U ${total})`,
         confidence: analysis.picks.total.confidence,
         reason: analysis.picks.total.reason,
-        line: { total, provider: g?.odds?.provider ?? null },
+        line: { total, provider },
       });
     }
   }
