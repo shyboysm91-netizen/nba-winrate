@@ -1,9 +1,19 @@
 import { fetchNBATeamLast10 } from "@/lib/nba/espn";
 
-type Last10Game = {
-  home: { id: string; score: number | null };
-  away: { id: string; score: number | null };
-  winner: "HOME" | "AWAY" | "TIE" | null;
+type Last10Row = {
+  wl: string; // "W" | "L" | 기타
+  pts: number | null;
+  ptsFor: number | null;
+  oppPts: number | null;
+  ptsAgainst: number | null;
+  // 아래는 있을 수도/없을 수도 (타입 안전용)
+  gameDate?: string;
+  date?: string;
+  matchup?: string;
+  isHome?: boolean;
+  oppTri?: string;
+  result?: string;
+  plusMinus?: number | null;
 };
 
 type TeamStats = {
@@ -24,20 +34,28 @@ function clamp(n: number, min: number, max: number) {
   return Math.max(min, Math.min(max, n));
 }
 
-function computeTeamStats(teamId: string, games10: Last10Game[]): TeamStats {
+function getPtsFor(g: Last10Row): number | null {
+  if (typeof g.ptsFor === "number") return g.ptsFor;
+  if (typeof g.pts === "number") return g.pts;
+  return null;
+}
+
+function getPtsAgainst(g: Last10Row): number | null {
+  if (typeof g.ptsAgainst === "number") return g.ptsAgainst;
+  if (typeof g.oppPts === "number") return g.oppPts;
+  return null;
+}
+
+function computeTeamStats(teamId: string, games10: Last10Row[]): TeamStats {
   let games = 0;
   let wins = 0;
   let losses = 0;
   let forSum = 0;
   let againstSum = 0;
 
-  for (const g of games10) {
-    const isHome = g.home.id === teamId;
-    const isAway = g.away.id === teamId;
-    if (!isHome && !isAway) continue;
-
-    const myScore = isHome ? g.home.score : g.away.score;
-    const oppScore = isHome ? g.away.score : g.home.score;
+  for (const g of games10 || []) {
+    const myScore = getPtsFor(g);
+    const oppScore = getPtsAgainst(g);
 
     if (myScore == null || oppScore == null) continue;
 
@@ -45,14 +63,9 @@ function computeTeamStats(teamId: string, games10: Last10Game[]): TeamStats {
     forSum += myScore;
     againstSum += oppScore;
 
-    if (g.winner === "TIE" || g.winner == null) continue;
-
-    const iWon =
-      (isHome && g.winner === "HOME") ||
-      (isAway && g.winner === "AWAY");
-
-    if (iWon) wins += 1;
-    else losses += 1;
+    const wl = String(g.wl ?? "").toUpperCase().trim();
+    if (wl === "W") wins += 1;
+    else if (wl === "L") losses += 1;
   }
 
   const winPct = games > 0 ? wins / games : 0;
@@ -63,9 +76,11 @@ function computeTeamStats(teamId: string, games10: Last10Game[]): TeamStats {
 }
 
 function confidenceFromEdge(edge: number, gamesUsed: number) {
-  const base = 50 + Math.abs(edge) * 6.5;
+  // edge 크기에 따라 50~92 사이
+  const base = 50 + Math.abs(edge) * 6.5; // 1점=6.5
   let conf = clamp(base, 50, 92);
 
+  // 데이터 적으면 상한 제한
   if (gamesUsed < 6) conf = Math.min(conf, 64);
   else if (gamesUsed < 8) conf = Math.min(conf, 72);
   else if (gamesUsed < 10) conf = Math.min(conf, 78);
@@ -76,8 +91,9 @@ function confidenceFromEdge(edge: number, gamesUsed: number) {
 export type AnalysisInput = {
   homeTeamId: string;
   awayTeamId: string;
-  spreadHome?: number;
-  total?: number;
+  // 선택 라인
+  spreadHome?: number; // 예: -5.5 (홈 기준)
+  total?: number; // 예: 228.5
 };
 
 export type AnalysisResult = {
@@ -88,7 +104,7 @@ export type AnalysisResult = {
   model: {
     expectedHomePts: number;
     expectedAwayPts: number;
-    expectedMarginHome: number;
+    expectedMarginHome: number; // 홈 기준 +면 홈 우세
     expectedTotal: number;
   };
 
@@ -105,10 +121,11 @@ export async function analyzeGame(input: AnalysisInput): Promise<AnalysisResult>
     fetchNBATeamLast10(input.awayTeamId),
   ]);
 
-  // ✅ last10 ❌ → games ⭕
-  const homeStats = computeTeamStats(input.homeTeamId, homeRes.games);
-  const awayStats = computeTeamStats(input.awayTeamId, awayRes.games);
+  // ✅ fetchNBATeamLast10() 반환: { teamId, season, games: [...] }
+  const homeStats = computeTeamStats(input.homeTeamId, (homeRes?.games ?? []) as Last10Row[]);
+  const awayStats = computeTeamStats(input.awayTeamId, (awayRes?.games ?? []) as Last10Row[]);
 
+  // 간단 모델: 예상 득점 = (내 평균득점 + 상대 평균실점) / 2
   const expectedHomePts = (homeStats.avgFor + awayStats.avgAgainst) / 2;
   const expectedAwayPts = (awayStats.avgFor + homeStats.avgAgainst) / 2;
 
@@ -117,6 +134,7 @@ export async function analyzeGame(input: AnalysisInput): Promise<AnalysisResult>
 
   const picks: AnalysisResult["picks"] = {};
 
+  // ML: 2점 이상 우세일 때만 추천
   if (expectedMarginHome >= 2) {
     picks.ml = {
       pick: "HOME",
@@ -137,7 +155,9 @@ export async function analyzeGame(input: AnalysisInput): Promise<AnalysisResult>
     };
   }
 
+  // SPREAD: spreadHome(홈 기준) 있을 때만
   if (typeof input.spreadHome === "number" && Number.isFinite(input.spreadHome)) {
+    // 홈이 -5.5이면, 홈이 5.5점 이상 이겨야 홈 커버
     const coverEdgeHome = expectedMarginHome - Math.abs(input.spreadHome);
     const coverEdgeAway = -expectedMarginHome - Math.abs(input.spreadHome);
 
@@ -162,24 +182,19 @@ export async function analyzeGame(input: AnalysisInput): Promise<AnalysisResult>
     }
   }
 
+  // TOTAL: total 있을 때만
   if (typeof input.total === "number" && Number.isFinite(input.total)) {
     const diff = expectedTotal - input.total;
     if (diff > 3) {
       picks.total = {
         pick: "OVER",
-        confidence: confidenceFromEdge(
-          diff,
-          Math.min(homeStats.games, awayStats.games)
-        ),
+        confidence: confidenceFromEdge(diff, Math.min(homeStats.games, awayStats.games)),
         reason: `예상 합계 ${round1(expectedTotal)} vs 라인 ${input.total}`,
       };
     } else if (diff < -3) {
       picks.total = {
         pick: "UNDER",
-        confidence: confidenceFromEdge(
-          diff,
-          Math.min(homeStats.games, awayStats.games)
-        ),
+        confidence: confidenceFromEdge(diff, Math.min(homeStats.games, awayStats.games)),
         reason: `예상 합계 ${round1(expectedTotal)} vs 라인 ${input.total}`,
       };
     }
