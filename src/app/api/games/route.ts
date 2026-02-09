@@ -25,10 +25,14 @@ function pickName(team: any) {
   return team?.displayName || team?.shortDisplayName || team?.name || team?.abbreviation || null;
 }
 
+/** ✅ 배포(Vercel) 환경 감지 */
+function isVercelProd() {
+  // Vercel에서 자동으로 들어가는 env
+  return process.env.VERCEL === "1" || !!process.env.VERCEL_URL;
+}
+
 /** =========================
- * ✅ 초간단 인메모리 캐시 (warm 인스턴스에서 즉시 체감)
- * - date별 결과를 60초 캐시
- * - 공식 일정 실패 후 ESPN fallback 결과도 캐시
+ * ✅ 초간단 캐시(60초)
  * ========================= */
 type CacheItem<T> = { exp: number; val: T };
 const g = globalThis as any;
@@ -45,15 +49,11 @@ function cacheGet<T>(key: string): T | null {
   }
   return hit.val as T;
 }
-
 function cacheSet<T>(key: string, val: T, ttlMs: number) {
   cache.set(key, { val, exp: Date.now() + ttlMs });
 }
 
 function withCacheHeaders(resp: NextResponse) {
-  // ✅ Vercel CDN 캐시도 함께 타도록 (짧게)
-  // - 60초 동안 공유 캐시
-  // - 백그라운드 재검증 허용
   resp.headers.set("Cache-Control", "public, s-maxage=60, stale-while-revalidate=300");
   return resp;
 }
@@ -71,26 +71,27 @@ export async function GET(req: Request) {
       );
     }
 
-    // ✅ 캐시 먼저 확인
-    const cacheKey = `games:${date}`;
+    // ✅ 캐시
+    const cacheKey = `games:${date}:${isVercelProd() ? "vercel" : "local"}`;
     const cached = cacheGet<any>(cacheKey);
-    if (cached) {
-      return withCacheHeaders(NextResponse.json(cached));
+    if (cached) return withCacheHeaders(NextResponse.json(cached));
+
+    const useEspnOnly = isVercelProd();
+
+    // ✅ 로컬에서는 nbaOfficial 우선 (원래대로)
+    if (!useEspnOnly) {
+      try {
+        const games = await getOfficialGamesForDashboard(date);
+        const payload = { ok: true, date, count: games.length, games, source: "nbaOfficial" };
+        cacheSet(cacheKey, payload, 60 * 1000);
+        return withCacheHeaders(NextResponse.json(payload));
+      } catch (e: any) {
+        const msg = String(e?.message ?? e);
+        console.error("[games] nba official failed -> fallback espn:", msg);
+      }
     }
 
-    // ✅ 1순위: NBA 공식 일정
-    try {
-      const games = await getOfficialGamesForDashboard(date);
-      const payload = { ok: true, date, count: games.length, games };
-      cacheSet(cacheKey, payload, 60 * 1000);
-      return withCacheHeaders(NextResponse.json(payload));
-    } catch (e: any) {
-      // 공식쪽이 깨져도 서비스가 멈추면 안 되니 ESPN으로 fallback
-      const msg = String(e?.message ?? e);
-      console.error("[games] nba official failed -> fallback espn:", msg);
-    }
-
-    // ✅ 2순위: ESPN fallback (기존 너 로직 유지용)
+    // ✅ 배포(Vercel)에서는 ESPN만 사용 (안정)
     const rawGames: any[] = await getEspnScoreboard(date);
 
     const games = rawGames.map((g) => {
@@ -137,8 +138,8 @@ export async function GET(req: Request) {
       };
 
       const kstText = g?.dateKST && g?.timeKST ? `${g.dateKST} ${g.timeKST} KST` : "";
-
       const gameId = String(g?.gameId ?? g?.id ?? "");
+
       return {
         gameId,
         id: gameId,
@@ -153,7 +154,7 @@ export async function GET(req: Request) {
       };
     });
 
-    const payload = { ok: true, date, count: games.length, games };
+    const payload = { ok: true, date, count: games.length, games, source: "espn" };
     cacheSet(cacheKey, payload, 60 * 1000);
     return withCacheHeaders(NextResponse.json(payload));
   } catch (e: any) {
