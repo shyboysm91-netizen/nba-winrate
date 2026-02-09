@@ -41,6 +41,71 @@ function isProRow(row: any): boolean {
   return false;
 }
 
+/** ✅ TOP3 내부 호출 플래그 (FREE 1회 제한 bypass 용) */
+const INTERNAL_TOP3_HEADER = "x-internal-top3";
+
+function isInternalTop3(req: Request) {
+  try {
+    const h = req.headers.get(INTERNAL_TOP3_HEADER);
+    if (h && String(h).trim() === "1") return true;
+
+    const { searchParams } = new URL(req.url);
+    const q = searchParams.get("internal");
+    if (q && String(q).trim() === "1") return true;
+  } catch {}
+  return false;
+}
+
+/** =========================
+ * ✅ 초간단 인메모리 캐시 (서버리스 warm 인스턴스에서만 효과)
+ * - games: 60초
+ * - odds: 60초
+ * ========================= */
+type CacheItem<T> = { exp: number; val: T };
+const gCache = globalThis as any;
+
+const GAMES_CACHE_KEY = "__NBA_GAMES_CACHE__";
+const ODDS_CACHE_KEY = "__NBA_ODDS_CACHE__";
+
+if (!gCache[GAMES_CACHE_KEY]) gCache[GAMES_CACHE_KEY] = new Map<string, CacheItem<any>>();
+if (!gCache[ODDS_CACHE_KEY]) gCache[ODDS_CACHE_KEY] = new Map<string, CacheItem<any>>();
+
+const gamesCache: Map<string, CacheItem<any>> = gCache[GAMES_CACHE_KEY];
+const oddsCache: Map<string, CacheItem<any>> = gCache[ODDS_CACHE_KEY];
+
+function cacheGet<T>(m: Map<string, CacheItem<T>>, key: string): T | null {
+  const hit = m.get(key);
+  if (!hit) return null;
+  if (Date.now() > hit.exp) {
+    m.delete(key);
+    return null;
+  }
+  return hit.val;
+}
+function cacheSet<T>(m: Map<string, CacheItem<T>>, key: string, val: T, ttlMs: number) {
+  m.set(key, { val, exp: Date.now() + ttlMs });
+}
+
+async function fetchGamesCached(date?: string) {
+  const key = `games:${date ?? "auto"}`;
+  const cached = cacheGet<any>(gamesCache, key);
+  if (cached) return cached;
+
+  const res = await fetchNBAGamesByKstDate(date);
+  cacheSet(gamesCache, key, res, 60 * 1000);
+  return res;
+}
+
+async function fetchOddsCached() {
+  const key = `odds:nba`;
+  const cached = cacheGet<NormalizedOdds>(oddsCache, key);
+  if (cached) return cached;
+
+  const res = await fetchNbaOdds({ useConsensus: false });
+  cacheSet(oddsCache, key, res, 60 * 1000);
+  return res;
+}
+
 /** ESPN triCode → The Odds API 팀명 */
 const TRI_TO_TEAM: Record<string, string> = {
   ATL: "Atlanta Hawks",
@@ -95,18 +160,37 @@ function parseMs(iso: string | null | undefined): number | null {
   return Number.isFinite(t) ? t : null;
 }
 
+/**
+ * ✅ FIX 1)
+ * The Odds API 매칭은 "영문 풀팀명" 기준
+ */
 function extractTeamsFromEspnGame(g: any): { home: string; away: string } {
-  const homeName =
+  const triHome = String(
+    g?.home?.triCode ?? g?.home?.abbr ?? g?.home?.abbreviation ?? ""
+  ).toUpperCase();
+  const triAway = String(
+    g?.away?.triCode ?? g?.away?.abbr ?? g?.away?.abbreviation ?? ""
+  ).toUpperCase();
+
+  const homeFromTri = TRI_TO_TEAM[triHome];
+  const awayFromTri = TRI_TO_TEAM[triAway];
+
+  const homeNameFallback =
+    g?.homeTeam?.displayName ||
+    g?.homeTeam?.name ||
     g?.home?.name ||
-    TRI_TO_TEAM[String(g?.home?.triCode ?? "").toUpperCase()] ||
-    String(g?.home?.triCode ?? "");
+    (triHome ? triHome : "");
 
-  const awayName =
+  const awayNameFallback =
+    g?.awayTeam?.displayName ||
+    g?.awayTeam?.name ||
     g?.away?.name ||
-    TRI_TO_TEAM[String(g?.away?.triCode ?? "").toUpperCase()] ||
-    String(g?.away?.triCode ?? "");
+    (triAway ? triAway : "");
 
-  return { home: homeName, away: awayName };
+  return {
+    home: homeFromTri ?? String(homeNameFallback ?? ""),
+    away: awayFromTri ?? String(awayNameFallback ?? ""),
+  };
 }
 
 function buildOddsBuckets(odds: NormalizedOdds) {
@@ -185,6 +269,8 @@ async function getSupabaseAuthClient() {
 
 export async function GET(req: Request) {
   try {
+    const internalTop3 = isInternalTop3(req);
+
     // ✅ 로그인 필수
     const supabaseAuth = await getSupabaseAuthClient();
     const {
@@ -203,7 +289,7 @@ export async function GET(req: Request) {
       );
     }
 
-    // ✅ subscriptions + daily_usage를 "유저 세션"으로 처리 (서비스 키 사용 X)
+    // ✅ subscriptions
     const { data: sub, error: subErr } = await supabaseAuth
       .from("subscriptions")
       .select("*")
@@ -219,8 +305,8 @@ export async function GET(req: Request) {
 
     const isPro = isProRow(sub);
 
-    // ✅ FREE: KST 기준 하루 1경기 제한
-    if (!isPro) {
+    // ✅ FREE: KST 기준 하루 1경기 제한 (TOP3 내부 호출은 제외)
+    if (!isPro && !internalTop3) {
       const dateKey = kstDateKeyNow();
 
       const { data: usage, error: usageErr } = await supabaseAuth
@@ -265,7 +351,6 @@ export async function GET(req: Request) {
       }
     }
 
-    // ---- 기존 로직 유지 (분석/픽 생성) ----
     const { searchParams } = new URL(req.url);
     const date = searchParams.get("date") || undefined;
     const gameId = searchParams.get("gameId") || "";
@@ -277,9 +362,10 @@ export async function GET(req: Request) {
       );
     }
 
-    const { date: dateKst, games } = await fetchNBAGamesByKstDate(date);
-    const g = (games || []).find((x: any) => String(x?.gameId) === String(gameId));
+    // ✅ games 캐시 사용
+    const { date: dateKst, games } = await fetchGamesCached(date);
 
+    const g = (games || []).find((x: any) => String(x?.gameId) === String(gameId));
     if (!g) {
       return NextResponse.json<ApiResp>(
         { ok: false, error: "해당 gameId의 경기를 찾지 못했습니다." },
@@ -287,19 +373,14 @@ export async function GET(req: Request) {
       );
     }
 
-    // ✅ 타입 확정: g에는 home/away만 존재 (homeTeam/awayTeam 없음)
-    const homeTeamId = String(g?.home?.teamId ?? "");
-    const awayTeamId = String(g?.away?.teamId ?? "");
+    const homeTeamId = String(g?.home?.teamId ?? g?.home?.id ?? "");
+    const awayTeamId = String(g?.away?.teamId ?? g?.away?.id ?? "");
 
     const triHome = String(g?.home?.triCode ?? "").toUpperCase();
     const triAway = String(g?.away?.triCode ?? "").toUpperCase();
 
-    const homeName = (g?.home?.name ?? TRI_TO_TEAM[triHome] ?? (triHome ? triHome : null)) as
-      | string
-      | null;
-    const awayName = (g?.away?.name ?? TRI_TO_TEAM[triAway] ?? (triAway ? triAway : null)) as
-      | string
-      | null;
+    const homeName = g?.home?.name ?? TRI_TO_TEAM[triHome] ?? (triHome ? triHome : null);
+    const awayName = g?.away?.name ?? TRI_TO_TEAM[triAway] ?? (triAway ? triAway : null);
 
     const conf0 = baseConfidence((games || []).length);
 
@@ -308,14 +389,22 @@ export async function GET(req: Request) {
     let marketProvider: string | null = null;
 
     try {
-      const odds = await fetchNbaOdds({ useConsensus: false });
+      // ✅ odds 캐시 사용 (TOP3에서 pick 여러번 호출해도 60초 안에 1번만 호출됨)
+      const odds = await fetchOddsCached();
       const buckets = buildOddsBuckets(odds);
 
       const { home, away } = extractTeamsFromEspnGame(g);
       const key = makeMatchKey(home, away);
       const candidates = buckets.get(key) ?? [];
 
-      const matched = pickClosestEvent(candidates, g?.startTimeUTC ?? null);
+      const startIso =
+        (g?.startTimeUTC as string | null) ??
+        (g?.raw?.gameDateTimeUTC as string | null) ??
+        (g?.raw?.gameTimeUTC as string | null) ??
+        (g?.raw?.startTimeUTC as string | null) ??
+        null;
+
+      const matched = pickClosestEvent(candidates, startIso);
 
       if (matched) {
         const sp = matched.markets?.spreads;
@@ -327,9 +416,7 @@ export async function GET(req: Request) {
         const pb: any = matched.pickedBookmaker ?? null;
         marketProvider = (pb?.key ?? pb?.title ?? null) as string | null;
       }
-    } catch {
-      // odds 실패해도 픽 생성은 계속
-    }
+    } catch {}
 
     const spreadHome =
       typeof marketSpreadHome === "number" && Number.isFinite(marketSpreadHome)
@@ -413,4 +500,37 @@ export async function GET(req: Request) {
       { status: 500 }
     );
   }
+}
+
+/* =========================
+   🔥 POST 어댑터 (GET 그대로 재사용)
+   - JSON body 없어도 동작 (쿼리 fallback)
+   - TOP3 내부 호출 헤더 추가
+   ========================= */
+export async function POST(req: Request) {
+  const url = new URL(req.url);
+
+  const body = await req.json().catch(() => null);
+  const gameId = body?.gameId ?? url.searchParams.get("gameId");
+  const date = body?.date ?? url.searchParams.get("date");
+
+  if (!gameId) {
+    return NextResponse.json<ApiResp>(
+      { ok: false, error: "gameId가 필요합니다." },
+      { status: 400 }
+    );
+  }
+
+  url.searchParams.set("gameId", String(gameId));
+  if (date) url.searchParams.set("date", String(date));
+
+  const headers = new Headers(req.headers);
+  headers.set(INTERNAL_TOP3_HEADER, "1");
+
+  const getReq = new Request(url.toString(), {
+    method: "GET",
+    headers,
+  });
+
+  return GET(getReq);
 }

@@ -1,392 +1,71 @@
-type NbaStatsScoreboardGame = {
-  gameId: string;
-  gameStatus: number;
-  gameStatusText: string;
-  gameTimeUTC: string;
-  period?: number;
-  gameClock?: string;
-  awayTeam: { teamId: string; teamTricode: string; score: number };
-  homeTeam: { teamId: string; teamTricode: string; score: number };
-};
-
-const KST_OFFSET_MIN = 9 * 60;
-
+// src/lib/nba/espn.ts
 /**
- * ✅ ESPN triCode -> NBA Stats TeamID (teamgamelog용)
- * (핵심: ESPN team.id 쓰면 teamgamelog가 깨져서 반드시 Stats TeamID로 맞춰야 함)
+ * ✅ 중요: /api/pick/route.ts 가 기대하는 시그니처를 "원래대로" 맞춘다.
+ * - fetchNBAGamesByKstDate(date?) => { date: "YYYYMMDD", games: any[] }
+ *
+ * 지금 games 화면은 NBA 공식 스케줄(nbaOfficial.ts)로 잘 나오고 있으니,
+ * 분석(pick)도 동일 소스를 쓰도록 여기서 공식 스케줄을 사용한다.
  */
-const TRI_TO_NBA_STATS_ID: Record<string, string> = {
-  ATL: "1610612737",
-  BOS: "1610612738",
-  BKN: "1610612751",
-  CHA: "1610612766",
-  CHI: "1610612741",
-  CLE: "1610612739",
-  DAL: "1610612742",
-  DEN: "1610612743",
-  DET: "1610612765",
-  GSW: "1610612744",
-  HOU: "1610612745",
-  IND: "1610612754",
-  LAC: "1610612746",
-  LAL: "1610612747",
-  MEM: "1610612763",
-  MIA: "1610612748",
-  MIL: "1610612749",
-  MIN: "1610612750",
-  NOP: "1610612740",
-  NYK: "1610612752",
-  OKC: "1610612760",
-  ORL: "1610612753",
-  PHI: "1610612755",
-  PHX: "1610612756",
-  POR: "1610612757",
-  SAC: "1610612758",
-  SAS: "1610612759",
-  TOR: "1610612761",
-  UTA: "1610612762",
-  WAS: "1610612764",
-};
 
-function nowKstYYYYMMDD(): string {
+import { getOfficialGamesForDashboard } from "@/lib/nba/nbaOfficial";
+
+function kstYmdToday(): string {
   const now = new Date();
-  const kst = new Date(now.getTime() + KST_OFFSET_MIN * 60 * 1000);
-  const y = kst.getUTCFullYear();
-  const m = String(kst.getUTCMonth() + 1).padStart(2, "0");
-  const d = String(kst.getUTCDate()).padStart(2, "0");
-  return `${y}${m}${d}`;
+  const s = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Seoul",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(now); // YYYY-MM-DD
+  return s;
 }
 
-function parseKstYYYYMMDD(dateStr: string): Date {
-  if (!/^\d{8}$/.test(dateStr)) throw new Error("INVALID_DATE");
-  const y = Number(dateStr.slice(0, 4));
-  const m = Number(dateStr.slice(4, 6));
-  const d = Number(dateStr.slice(6, 8));
-  const utc = new Date(Date.UTC(y, m - 1, d, 0, 0, 0));
-  utc.setUTCMinutes(utc.getUTCMinutes() - KST_OFFSET_MIN);
-  return utc;
-}
+function normalizeToYmd(input?: string | null): string {
+  const raw = (input ?? "").trim();
+  if (!raw) return kstYmdToday();
 
-function kstYyyymmddFromUtcIso(isoUtc: string): string {
-  const dt = new Date(isoUtc);
-  const kst = new Date(dt.getTime() + KST_OFFSET_MIN * 60 * 1000);
-  const y = kst.getUTCFullYear();
-  const m = String(kst.getUTCMonth() + 1).padStart(2, "0");
-  const d = String(kst.getUTCDate()).padStart(2, "0");
-  return `${y}${m}${d}`;
-}
-
-function toYmd(dateUtc: Date): string {
-  const y = dateUtc.getUTCFullYear();
-  const m = String(dateUtc.getUTCMonth() + 1).padStart(2, "0");
-  const d = String(dateUtc.getUTCDate()).padStart(2, "0");
-  return `${y}-${m}-${d}`;
-}
-
-function seasonFromKstYyyymmdd(dateKst: string): string {
-  const y = Number(dateKst.slice(0, 4));
-  const m = Number(dateKst.slice(4, 6));
-  const startYear = m >= 10 ? y : y - 1;
-  return `${startYear}-${String((startYear + 1) % 100).padStart(2, "0")}`;
-}
-
-function normalizeStatus(gameStatus: number, text: string) {
-  if (gameStatus === 3) return { state: "FINAL" as const, label: text || "Final" };
-  if (gameStatus === 2) return { state: "LIVE" as const, label: text || "Live" };
-  return { state: "SCHEDULED" as const, label: text || "Scheduled" };
-}
-
-async function fetchNbaStats(url: string) {
-  const res = await fetch(url, {
-    cache: "no-store",
-    headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0 Safari/537.36",
-      Accept: "application/json, text/plain, */*",
-      "Accept-Language": "en-US,en;q=0.9,ko;q=0.8",
-      Referer: "https://www.nba.com/",
-      Origin: "https://www.nba.com",
-      Connection: "keep-alive",
-    },
-  });
-
-  if (!res.ok) throw new Error(`NBA_STATS_HTTP_${res.status}`);
-  return res.json();
-}
-
-async function fetchNbaStatsScoreboardV3(ymd: string): Promise<NbaStatsScoreboardGame[]> {
-  const url = `https://stats.nba.com/stats/scoreboardv3?GameDate=${encodeURIComponent(
-    ymd
-  )}&LeagueID=00`;
-
-  const json = await fetchNbaStats(url);
-  const games = json?.scoreboard?.games ?? [];
-
-  return (games as any[]).map((g) => {
-    const away = g?.awayTeam ?? {};
-    const home = g?.homeTeam ?? {};
-
-    return {
-      gameId: String(g.gameId ?? ""),
-      gameStatus: Number(g.gameStatus ?? 0),
-      gameStatusText: String(g.gameStatusText ?? ""),
-      gameTimeUTC: String(g.gameTimeUTC ?? g.gameTimeUtc ?? ""),
-      period: Number(g?.period ?? 0) || undefined,
-      gameClock: g?.gameClock ? String(g.gameClock) : undefined,
-      awayTeam: {
-        teamId: String(away.teamId ?? ""),
-        teamTricode: String(away.teamTricode ?? ""),
-        score: Number(away.score ?? 0),
-      },
-      homeTeam: {
-        teamId: String(home.teamId ?? ""),
-        teamTricode: String(home.teamTricode ?? ""),
-        score: Number(home.score ?? 0),
-      },
-    };
-  });
-}
-
-/**
- * ✅ ESPN Scoreboard fallback
- * - stats.nba.com이 막히거나 gameTimeUTC가 비어서 필터가 0이 되는 경우 대응
- */
-async function fetchEspnScoreboard(dateKstYYYYMMDD: string) {
-  const url = `https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates=${encodeURIComponent(
-    dateKstYYYYMMDD
-  )}`;
-
-  const res = await fetch(url, { cache: "no-store" });
-  if (!res.ok) throw new Error(`ESPN_HTTP_${res.status}`);
-  const json = await res.json();
-
-  const events: any[] = Array.isArray(json?.events) ? json.events : [];
-  const games = events
-    .map((e) => {
-      const comps = e?.competitions?.[0]?.competitors ?? [];
-      const home = comps.find((c: any) => c?.homeAway === "home");
-      const away = comps.find((c: any) => c?.homeAway === "away");
-      if (!home || !away) return null;
-
-      const homeTri = String(home?.team?.abbreviation ?? "").toUpperCase();
-      const awayTri = String(away?.team?.abbreviation ?? "").toUpperCase();
-
-      const homeTeamId = TRI_TO_NBA_STATS_ID[homeTri] ?? "";
-      const awayTeamId = TRI_TO_NBA_STATS_ID[awayTri] ?? "";
-
-      // teamId 매핑이 없으면 분석/last10이 깨지니까 제외
-      if (!homeTeamId || !awayTeamId) return null;
-
-      const startUtc = String(e?.date ?? e?.competitions?.[0]?.date ?? "");
-      if (!startUtc) return null;
-
-      // ESPN status
-      const typeState = String(
-        e?.status?.type?.state ?? e?.competitions?.[0]?.status?.type?.state ?? ""
-      ).toUpperCase();
-
-      const state =
-        typeState === "POST" ? "FINAL" : typeState === "IN" ? "LIVE" : "SCHEDULED";
-
-      const label =
-        String(e?.status?.type?.shortDetail ?? e?.status?.type?.description ?? "") ||
-        state;
-
-      const periodRaw =
-        e?.status?.period ?? e?.competitions?.[0]?.status?.period ?? null;
-
-      const clockRaw =
-        e?.status?.displayClock ?? e?.competitions?.[0]?.status?.displayClock ?? null;
-
-      return {
-        gameId: String(e?.id ?? e?.uid ?? ""),
-        startTimeUTC: startUtc,
-        startTimeKST: new Date(new Date(startUtc).getTime() + KST_OFFSET_MIN * 60 * 1000).toISOString(),
-        status: state as "FINAL" | "LIVE" | "SCHEDULED",
-        statusText: label,
-        period: typeof periodRaw === "number" ? periodRaw : periodRaw ? Number(periodRaw) : null,
-        clock: clockRaw ? String(clockRaw) : null,
-        away: {
-          teamId: awayTeamId,
-          triCode: awayTri,
-          name: null,
-          score: away?.score != null ? Number(away.score) : null,
-        },
-        home: {
-          teamId: homeTeamId,
-          triCode: homeTri,
-          name: null,
-          score: home?.score != null ? Number(home.score) : null,
-        },
-      };
-    })
-    .filter(Boolean) as any[];
-
-  return games;
-}
-
-/**
- * ✅ KST 날짜 경기 목록
- */
-export async function fetchNBAGamesByKstDate(date?: string) {
-  const dateKst = date ?? nowKstYYYYMMDD();
-
-  const kstMidnightUtc = parseKstYYYYMMDD(dateKst);
-  const utcPrev = new Date(kstMidnightUtc.getTime() - 24 * 60 * 60 * 1000);
-  const utcCur = new Date(kstMidnightUtc.getTime());
-  const utcNext = new Date(kstMidnightUtc.getTime() + 24 * 60 * 60 * 1000);
-
-  const [a, b, c] = await Promise.allSettled([
-    fetchNbaStatsScoreboardV3(toYmd(utcPrev)),
-    fetchNbaStatsScoreboardV3(toYmd(utcCur)),
-    fetchNbaStatsScoreboardV3(toYmd(utcNext)),
-  ]);
-
-  const all = [
-    ...(a.status === "fulfilled" ? a.value : []),
-    ...(b.status === "fulfilled" ? b.value : []),
-    ...(c.status === "fulfilled" ? c.value : []),
-  ];
-
-  const byId = new Map<string, NbaStatsScoreboardGame>();
-  for (const g of all) if (g?.gameId) byId.set(g.gameId, g);
-
-  const filtered = [...byId.values()].filter((g) => {
-    if (!g.gameTimeUTC) return false;
-    return kstYyyymmddFromUtcIso(g.gameTimeUTC) === dateKst;
-  });
-
-  const gamesFromStats = filtered.map((g) => {
-    const st = normalizeStatus(g.gameStatus, g.gameStatusText);
-    return {
-      gameId: g.gameId,
-      startTimeUTC: g.gameTimeUTC,
-      startTimeKST: new Date(new Date(g.gameTimeUTC).getTime() + KST_OFFSET_MIN * 60 * 1000).toISOString(),
-      status: st.state,
-      statusText: st.label,
-      period: g.period ?? null,
-      clock: g.gameClock ?? null,
-      away: {
-        teamId: g.awayTeam.teamId,
-        triCode: g.awayTeam.teamTricode,
-        name: null,
-        score: Number.isFinite(g.awayTeam.score) ? g.awayTeam.score : null,
-      },
-      home: {
-        teamId: g.homeTeam.teamId,
-        triCode: g.homeTeam.teamTricode,
-        name: null,
-        score: Number.isFinite(g.homeTeam.score) ? g.homeTeam.score : null,
-      },
-    };
-  });
-
-  // ✅ 핵심: stats 결과가 0이면 ESPN으로 fallback
-  if (gamesFromStats.length === 0) {
-    try {
-      const espnGames = await fetchEspnScoreboard(dateKst);
-      if (Array.isArray(espnGames) && espnGames.length > 0) {
-        return { date: dateKst, games: espnGames };
-      }
-    } catch {
-      // fallback도 실패하면 그냥 기존대로 0개
-    }
+  // YYYYMMDD
+  if (/^\d{8}$/.test(raw)) {
+    return `${raw.slice(0, 4)}-${raw.slice(4, 6)}-${raw.slice(6, 8)}`;
   }
 
-  return { date: dateKst, games: gamesFromStats };
+  // YYYY-MM-DD
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
+
+  // 그 외는 오늘로 처리(깨지지 않게)
+  return kstYmdToday();
+}
+
+function ymdToKey(ymd: string): string {
+  return ymd.replaceAll("-", "");
 }
 
 /**
- * ✅ 호환 유지
+ * ✅ /api/pick/route.ts 가 import 하는 함수 (복구)
+ * - 반환: { date: YYYYMMDD, games: [...] }
+ * - games는 Dashboard 호환 구조 (home/away/odds) 그대로
  */
-export async function fetchNBAScoreboard(date?: string) {
-  return fetchNBAGamesByKstDate(date);
+export async function fetchNBAGamesByKstDate(date?: string | null): Promise<{ date: string; games: any[] }> {
+  const ymd = normalizeToYmd(date);
+  const key = ymdToKey(ymd);
+
+  const games = await getOfficialGamesForDashboard(ymd); // 이미 Dashboard 호환 형태로 만들어짐
+
+  // gameId/id는 무조건 문자열로 보장(매칭 안정화)
+  const fixed = (games || []).map((g: any) => {
+    const gameId = g?.gameId != null ? String(g.gameId) : (g?.id != null ? String(g.id) : "");
+    return { ...g, gameId, id: gameId };
+  });
+
+  return { date: key, games: fixed };
 }
 
 /**
- * ✅ 핵심: 시즌 데이터가 비면 자동 fallback
- * - 1순위: dateKst 시즌
- * - 2순위: 오늘(KST) 시즌
- * - 3순위: (2순위 - 1년) 시즌
+ * (옵션) 예전 ESPN 기반 함수가 다른 곳에서 필요할 수도 있어서 "빈 껍데기"로 유지 가능.
+ * 지금 프로젝트 흐름에서는 공식 스케줄을 쓰고 있으니 pick/games는 위 함수로 해결된다.
  */
-export async function fetchNBATeamLast10(teamId: string, dateKst?: string) {
-  const tid = String(teamId ?? "").trim();
-  if (!tid) throw new Error("TEAM_ID_REQUIRED");
-
-  const baseDate = dateKst && /^\d{8}$/.test(dateKst) ? dateKst : nowKstYYYYMMDD();
-  const today = nowKstYYYYMMDD();
-
-  const season1 = seasonFromKstYyyymmdd(baseDate);
-  const season2 = seasonFromKstYyyymmdd(today);
-
-  const prevStartYear = Number(season2.slice(0, 4)) - 1;
-  const season3 = `${prevStartYear}-${String((prevStartYear + 1) % 100).padStart(2, "0")}`;
-
-  const seasons = Array.from(new Set([season1, season2, season3]));
-
-  for (const season of seasons) {
-    const url =
-      `https://stats.nba.com/stats/teamgamelog?` +
-      `TeamID=${encodeURIComponent(tid)}` +
-      `&Season=${encodeURIComponent(season)}` +
-      `&SeasonType=${encodeURIComponent("Regular Season")}`;
-
-    const json = await fetchNbaStats(url);
-
-    const rs = (json?.resultSets?.[0] ?? json?.resultSet) as any;
-    const headers: string[] = rs?.headers ?? [];
-    const rows: any[] = rs?.rowSet ?? [];
-
-    if (!Array.isArray(rows) || rows.length === 0) continue;
-
-    const idx = (name: string) =>
-      headers.findIndex((h) => String(h).toUpperCase() === name);
-
-    const iGameDate = idx("GAME_DATE");
-    const iMatchup = idx("MATCHUP");
-    const iWL = idx("WL");
-    const iPTS = idx("PTS");
-    const iPlusMinus = idx("PLUS_MINUS");
-
-    const last10 = rows.slice(0, 10).map((r) => {
-      const gameDate = iGameDate >= 0 ? String(r[iGameDate] ?? "") : "";
-      const matchup = iMatchup >= 0 ? String(r[iMatchup] ?? "") : "";
-      const wl = iWL >= 0 ? String(r[iWL] ?? "") : "";
-
-      const pts = iPTS >= 0 ? Number(r[iPTS] ?? 0) : null;
-      const plusMinus =
-        iPlusMinus >= 0 && r[iPlusMinus] != null ? Number(r[iPlusMinus]) : null;
-
-      const oppPts =
-        typeof pts === "number" &&
-        Number.isFinite(pts) &&
-        typeof plusMinus === "number" &&
-        Number.isFinite(plusMinus)
-          ? pts - plusMinus
-          : null;
-
-      const isHome = matchup.includes(" vs. ");
-      const oppTri = matchup.split(isHome ? " vs. " : " @ ")[1] ?? "";
-
-      return {
-        gameDate,
-        date: gameDate,
-        matchup,
-        isHome,
-        oppTri,
-        wl,
-        result: wl,
-        pts,
-        ptsFor: pts,
-        oppPts,
-        ptsAgainst: oppPts,
-        plusMinus,
-      };
-    });
-
-    return { teamId: tid, season, games: last10 };
-  }
-
-  // 전부 실패하면 빈 배열 반환
-  return { teamId: tid, season: seasons[0] ?? "", games: [] };
+export async function getNBAScoreboard(_date: string): Promise<any[]> {
+  // 기존 코드가 필요하면 여기에 ESPN 호출 로직을 유지해도 됨.
+  // 현재는 사용처가 없어도 빌드/런타임 깨지지 않게 배열 반환.
+  return [];
 }

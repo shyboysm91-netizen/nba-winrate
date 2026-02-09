@@ -1,15 +1,11 @@
 import { NextResponse } from "next/server";
 import { requirePaid } from "@/lib/subscription/requirePaid";
 import { fetchNBAGamesByKstDate } from "@/lib/nba/espn";
-import { fetchNbaOdds, type NormalizedOdds } from "@/lib/odds/theOddsApi";
+import { POST as pickPOST } from "@/app/api/pick/route";
 
 type ApiResp =
   | { ok: true; result: any }
   | { ok: false; error: string };
-
-function clamp(n: number, a: number, b: number) {
-  return Math.max(a, Math.min(b, n));
-}
 
 function yyyymmddLocal(addDays = 0) {
   const d = new Date();
@@ -20,13 +16,6 @@ function yyyymmddLocal(addDays = 0) {
   return `${y}${m}${day}`;
 }
 
-function confidenceBase(gameCount: number) {
-  if (gameCount >= 10) return 80;
-  if (gameCount >= 7) return 75;
-  return 70;
-}
-
-/** ✅ 상태값: FINAL/취소/연기/중단 계열만 제외하고 나머지는 분석 가능 */
 function isAnalyzableStatus(raw: unknown) {
   const s = String(raw ?? "").trim().toLowerCase();
   if (!s) return true;
@@ -46,7 +35,6 @@ function isAnalyzableStatus(raw: unknown) {
     "complete",
     "completed",
   ];
-
   return !blocked.some((k) => s.includes(k));
 }
 
@@ -54,124 +42,8 @@ function hasAnalyzableGames(games: any[]) {
   return (games || []).some((g) => isAnalyzableStatus(g?.status));
 }
 
-/** ESPN triCode → The Odds API 팀명 */
-const TRI_TO_TEAM: Record<string, string> = {
-  ATL: "Atlanta Hawks",
-  BOS: "Boston Celtics",
-  BKN: "Brooklyn Nets",
-  CHA: "Charlotte Hornets",
-  CHI: "Chicago Bulls",
-  CLE: "Cleveland Cavaliers",
-  DAL: "Dallas Mavericks",
-  DEN: "Denver Nuggets",
-  DET: "Detroit Pistons",
-  GSW: "Golden State Warriors",
-  HOU: "Houston Rockets",
-  IND: "Indiana Pacers",
-  LAC: "Los Angeles Clippers",
-  LAL: "Los Angeles Lakers",
-  MEM: "Memphis Grizzlies",
-  MIA: "Miami Heat",
-  MIL: "Milwaukee Bucks",
-  MIN: "Minnesota Timberwolves",
-  NOP: "New Orleans Pelicans",
-  NYK: "New York Knicks",
-  OKC: "Oklahoma City Thunder",
-  ORL: "Orlando Magic",
-  PHI: "Philadelphia 76ers",
-  PHX: "Phoenix Suns",
-  POR: "Portland Trail Blazers",
-  SAC: "Sacramento Kings",
-  SAS: "San Antonio Spurs",
-  TOR: "Toronto Raptors",
-  UTA: "Utah Jazz",
-  WAS: "Washington Wizards",
-};
-
-function normTeamName(name: string): string {
-  return (name ?? "")
-    .toLowerCase()
-    .replace(/\./g, "")
-    .replace(/’/g, "'")
-    .replace(/[^a-z0-9\s]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function makeMatchKey(home: string, away: string): string {
-  return `${normTeamName(home)}__${normTeamName(away)}`;
-}
-
-function parseMs(iso: string | null | undefined): number | null {
-  if (!iso) return null;
-  const t = Date.parse(iso);
-  return Number.isFinite(t) ? t : null;
-}
-
-/** ✅ 타입 안전: g에는 home/away만 존재 (homeTeam/awayTeam 접근 금지) */
-function extractTeamsFromEspnGame(g: any): { home: string; away: string } {
-  const triHome = String(g?.home?.triCode ?? "").toUpperCase();
-  const triAway = String(g?.away?.triCode ?? "").toUpperCase();
-
-  const homeName = g?.home?.name || TRI_TO_TEAM[triHome] || (triHome ? triHome : "");
-  const awayName = g?.away?.name || TRI_TO_TEAM[triAway] || (triAway ? triAway : "");
-
-  return { home: homeName, away: awayName };
-}
-
-function buildOddsBuckets(odds: NormalizedOdds) {
-  const buckets = new Map<string, NormalizedOdds["events"][number][]>();
-
-  for (const e of odds.events) {
-    const k1 = makeMatchKey(e.homeTeam, e.awayTeam);
-    const k2 = makeMatchKey(e.awayTeam, e.homeTeam);
-
-    if (!buckets.has(k1)) buckets.set(k1, []);
-    buckets.get(k1)!.push(e);
-
-    if (!buckets.has(k2)) buckets.set(k2, []);
-    buckets.get(k2)!.push(e);
-  }
-
-  return buckets;
-}
-
-function pickClosestEvent(
-  candidates: NormalizedOdds["events"][number][],
-  startTimeUtcIso: string | null
-) {
-  if (!candidates.length) return null;
-
-  const startMs = parseMs(startTimeUtcIso);
-  if (startMs === null) return candidates[0];
-
-  let best = candidates[0];
-  let bestDiff = Infinity;
-
-  for (const c of candidates) {
-    const cMs = parseMs(c.commenceTime);
-    if (cMs === null) continue;
-    const diff = Math.abs(cMs - startMs);
-    if (diff < bestDiff) {
-      best = c;
-      bestDiff = diff;
-    }
-  }
-
-  if (!Number.isFinite(bestDiff) || bestDiff > 24 * 60 * 60 * 1000) return null;
-  return best;
-}
-
-/**
- * ✅ 기본 날짜 자동 선택
- * - 오늘에 "분석 가능" 경기가 있으면 → 오늘
- * - 없으면 → 내일
- */
 async function resolveAutoDate(explicitDate?: string) {
-  if (explicitDate) {
-    const r = await fetchNBAGamesByKstDate(explicitDate);
-    return r; // { date, games }
-  }
+  if (explicitDate) return await fetchNBAGamesByKstDate(explicitDate);
 
   const today = yyyymmddLocal(0);
   const tomorrow = yyyymmddLocal(1);
@@ -188,9 +60,202 @@ async function resolveAutoDate(explicitDate?: string) {
   return await fetchNBAGamesByKstDate(tomorrow);
 }
 
+function unwrapPick(json: any) {
+  if (!json || typeof json !== "object") return json;
+  if (json.result && typeof json.result === "object") return json.result;
+  if (json.data && typeof json.data === "object") return json.data;
+  return json;
+}
+
+type PickType = "ML" | "SPREAD" | "TOTAL";
+
+function isModelSimple(provider: any) {
+  return String(provider ?? "").toUpperCase() === "MODEL_SIMPLE";
+}
+
+function isDefaultFallbackOdds(spread?: any, total?: any) {
+  const s = Number(spread);
+  const t = Number(total);
+  return Number.isFinite(s) && Number.isFinite(t) && s === -2 && t === 218;
+}
+
+function getConf(x: any) {
+  const n = Number(x?.confidence ?? x?.score ?? x?.trust ?? -1);
+  return Number.isFinite(n) ? n : -1;
+}
+
+function deepProvider(node: any): string | null {
+  if (!node || typeof node !== "object") return null;
+  const direct =
+    node.provider ??
+    node.lineProvider ??
+    node.base ??
+    node.book ??
+    node.bookmaker ??
+    node?.ui?.provider ??
+    node?.ui?.base ??
+    node?.ui?.book ??
+    node?.ui?.bookmaker ??
+    node?.meta?.provider ??
+    node?.meta?.base ??
+    node?.meta?.book ??
+    node?.meta?.bookmaker ??
+    node?.odds?.provider ??
+    node?.market?.provider ??
+    null;
+  return direct ? String(direct) : null;
+}
+
+function deepSpreadLine(node: any): number | null {
+  if (!node || typeof node !== "object") return null;
+  const raw =
+    node?.ui?.pickLine ??
+    node?.pickLine ??
+    node?.line ??
+    node?.handicap ??
+    node?.spread ??
+    node?.lines?.spreadHome ??
+    node?.lines?.spread ??
+    node?.odds?.spread ??
+    node?.market?.spread ??
+    node?.meta?.spread ??
+    null;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : null;
+}
+
+function deepTotalLine(node: any): number | null {
+  if (!node || typeof node !== "object") return null;
+  const raw =
+    node?.ui?.totalLine ??
+    node?.totalLine ??
+    node?.line ??
+    node?.total ??
+    node?.lines?.total ??
+    node?.odds?.total ??
+    node?.market?.total ??
+    node?.meta?.total ??
+    null;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : null;
+}
+
+function scanPicksByUiSignature(pickPayloadRaw: any): Array<{ type: PickType; item: any }> {
+  const root = unwrapPick(pickPayloadRaw);
+  const out: Array<{ type: PickType; item: any }> = [];
+  const seen = new Set<any>();
+
+  const classify = (node: any): PickType | null => {
+    if (!node || typeof node !== "object") return null;
+
+    const ui = node.ui;
+    if (!ui || typeof ui !== "object") return null;
+
+    const pickLine = Number(ui.pickLine ?? node.pickLine ?? node.line ?? node.handicap);
+    const totalLine = Number(ui.totalLine ?? node.totalLine ?? node.total ?? node.line);
+
+    if (Number.isFinite(pickLine)) return "SPREAD";
+    if (Number.isFinite(totalLine) || ui.pickTotal) return "TOTAL";
+
+    const hasTeam = Boolean(ui.pickTeamId || ui.pickTeamName);
+    const hasSide = Boolean(ui.pickSide);
+    if (hasTeam && hasSide) return "ML";
+
+    return null;
+  };
+
+  const walk = (node: any) => {
+    if (!node || typeof node !== "object") return;
+    if (seen.has(node)) return;
+    seen.add(node);
+
+    const t = classify(node);
+    if (t) out.push({ type: t, item: node });
+
+    if (Array.isArray(node)) {
+      for (const it of node) walk(it);
+      return;
+    }
+
+    for (const k of Object.keys(node)) walk((node as any)[k]);
+  };
+
+  walk(root);
+  return out;
+}
+
+async function callPickViaHandler(req: Request, gameId: string, dateKst: string) {
+  const url = new URL(req.url);
+  const pickUrl = `${url.origin}/api/pick`;
+
+  const cookie = req.headers.get("cookie") || "";
+  const authorization = req.headers.get("authorization") || "";
+
+  const pickReq = new Request(pickUrl, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      cookie,
+      authorization,
+    },
+    body: JSON.stringify({ gameId, date: dateKst }),
+  });
+
+  const res = await pickPOST(pickReq);
+  const status = (res as Response).status;
+
+  let json: any = null;
+  try {
+    json = await (res as Response).json();
+  } catch {
+    json = null;
+  }
+
+  const logicalOk =
+    status >= 200 &&
+    status < 300 &&
+    (json?.ok === true || typeof json?.ok === "undefined");
+
+  return { ok: logicalOk, status, json };
+}
+
+/** ✅ 동시성 제한 병렬 실행 */
+async function mapLimit<T, R>(
+  arr: T[],
+  limit: number,
+  fn: (item: T, idx: number) => Promise<R>
+): Promise<R[]> {
+  const out: R[] = new Array(arr.length) as any;
+  let i = 0;
+
+  const workers = new Array(Math.max(1, Math.min(limit, arr.length))).fill(0).map(async () => {
+    while (true) {
+      const idx = i++;
+      if (idx >= arr.length) break;
+      out[idx] = await fn(arr[idx], idx);
+    }
+  });
+
+  await Promise.all(workers);
+  return out;
+}
+
+function pickTop3DistinctByGame(items: any[], used: Set<string>) {
+  const sorted = [...items].sort((a, b) => getConf(b) - getConf(a));
+  const out: any[] = [];
+  for (const it of sorted) {
+    const gid = String(it?.game?.gameId ?? it?.gameId ?? "");
+    if (!gid) continue;
+    if (used.has(gid)) continue;
+    used.add(gid);
+    out.push(it);
+    if (out.length >= 3) break;
+  }
+  return out;
+}
+
 export async function GET(req: Request) {
   try {
-    // ✅ TOP3는 PRO 전용 (무료 완전 잠금)
     await requirePaid();
 
     const { searchParams } = new URL(req.url);
@@ -199,7 +264,7 @@ export async function GET(req: Request) {
     const { date: dateKst, games } = await resolveAutoDate(explicitDate);
 
     if (!Array.isArray(games) || games.length === 0) {
-      return NextResponse.json<ApiResp>({
+      return NextResponse.json({
         ok: true,
         result: {
           date: dateKst,
@@ -207,145 +272,166 @@ export async function GET(req: Request) {
           candidates: 0,
           top3: [],
           note: "해당 날짜 경기 없음",
-          options: { provider: "MODEL_SIMPLE", mode: "9PICKS" },
         },
-      });
+      } satisfies ApiResp);
     }
 
-    // ✅ Odds는 TOP3 요청당 1번만 호출
-    let oddsBuckets: Map<string, NormalizedOdds["events"][number][]> | null = null;
-    let oddsFetchedAt: string | null = null;
-    let oddsUsage: NormalizedOdds["usage"] | null = null;
+    const targets = (games || [])
+      .filter((g: any) => {
+        const gameId = String(g?.gameId ?? "");
+        if (!gameId) return false;
+        if (!isAnalyzableStatus(g?.status)) return false;
+        const homeTeamId = String(g?.home?.teamId ?? "");
+        const awayTeamId = String(g?.away?.teamId ?? "");
+        if (!homeTeamId || !awayTeamId) return false;
+        return true;
+      })
+      .map((g: any) => ({
+        gameId: String(g.gameId),
+        homeTeamId: String(g?.home?.teamId ?? ""),
+        awayTeamId: String(g?.away?.teamId ?? ""),
+        homeTeamName: g?.home?.name ?? null,
+        awayTeamName: g?.away?.name ?? null,
+      }));
 
-    try {
-      const odds = await fetchNbaOdds({ useConsensus: false });
-      oddsBuckets = buildOddsBuckets(odds);
-      oddsFetchedAt = odds.fetchedAt;
-      oddsUsage = odds.usage ?? null;
-    } catch {
-      oddsBuckets = null;
-    }
+    const mlAll: any[] = [];
+    const spAll: any[] = [];
+    const ttAll: any[] = [];
 
-    const baseConf = confidenceBase(games.length);
+    let pickCalled = 0;
+    let pickOk = 0;
 
-    const ml: any[] = [];
-    const spread: any[] = [];
-    const total: any[] = [];
+    let excludedPickFail = 0;
+    let excludedNoProvider = 0;
+    let excludedModelSimple = 0;
+    let excludedFallback = 0;
+    let excludedNoLine = 0;
 
-    for (const g of games) {
-      // ✅ 타입 에러 방지: id 접근 금지 (teamId만 사용)
-      const homeTeamId = String(g?.home?.teamId ?? "");
-      const awayTeamId = String(g?.away?.teamId ?? "");
-      if (!homeTeamId || !awayTeamId) continue;
+    let firstPickShape: any = null;
 
-      const triHome = String(g?.home?.triCode ?? "").toUpperCase();
-      const triAway = String(g?.away?.triCode ?? "").toUpperCase();
+    // ✅ 병렬(동시성 4)로 pick 호출
+    const results = await mapLimit(
+      targets,
+      4,
+      async (t) => {
+        pickCalled += 1;
+        const pr = await callPickViaHandler(req, t.gameId, dateKst);
+        return { t, pr };
+      }
+    );
 
-      const homeDisplay = g?.home?.name ?? TRI_TO_TEAM[triHome] ?? (triHome ? triHome : null);
-      const awayDisplay = g?.away?.name ?? TRI_TO_TEAM[triAway] ?? (triAway ? triAway : null);
+    for (const { t, pr } of results) {
+      if (!pr.ok || !pr.json) {
+        excludedPickFail += 1;
+        continue;
+      }
+      pickOk += 1;
 
-      // ✅ 실제 배당 매칭
-      let marketSpreadHome: number | null = null;
-      let marketTotal: number | null = null;
-      let marketProvider: string | null = null;
+      const payload = unwrapPick(pr.json);
 
-      if (oddsBuckets) {
-        const { home, away } = extractTeamsFromEspnGame(g);
-        const key = makeMatchKey(home, away);
-        const candidates = oddsBuckets.get(key) ?? [];
-        const matched = pickClosestEvent(candidates, g?.startTimeUTC ?? null);
-
-        if (matched) {
-          const sp = matched.markets?.spreads;
-          const tt = matched.markets?.totals;
-
-          marketSpreadHome = typeof sp?.homePoint === "number" ? sp.homePoint : null;
-          marketTotal = typeof tt?.point === "number" ? tt.point : null;
-
-          // ✅ provider: key 우선, 없으면 title
-          const pb: any = matched.pickedBookmaker ?? null;
-          marketProvider = (pb?.key ?? pb?.title ?? null) as string | null;
-        }
+      if (!firstPickShape) {
+        firstPickShape = {
+          pickStatus: pr.status,
+          envelopeKeys: pr.json ? Object.keys(pr.json) : null,
+          payloadKeys: payload ? Object.keys(payload) : null,
+          providerGuess: deepProvider(payload),
+          spreadGuess: deepSpreadLine(payload),
+          totalGuess: deepTotalLine(payload),
+        };
       }
 
-      const spreadHome =
-        typeof marketSpreadHome === "number" && Number.isFinite(marketSpreadHome)
-          ? marketSpreadHome
-          : -2;
+      const payloadProvider = deepProvider(payload);
+      const payloadSpread = deepSpreadLine(payload);
+      const payloadTotal = deepTotalLine(payload);
 
-      const totalLine =
-        typeof marketTotal === "number" && Number.isFinite(marketTotal)
-          ? marketTotal
-          : 218;
+      const scanned = scanPicksByUiSignature(pr.json);
 
-      const lineProvider = marketProvider ?? "MODEL_SIMPLE";
+      for (const { type, item } of scanned) {
+        const provider = deepProvider(item) ?? payloadProvider;
+        if (!provider) {
+          excludedNoProvider += 1;
+          continue;
+        }
+        if (isModelSimple(provider)) {
+          excludedModelSimple += 1;
+          continue;
+        }
 
-      const gameMeta = {
-        gameId: g.gameId,
-        date: dateKst,
-        homeTeamId,
-        awayTeamId,
-        homeTeamName: homeDisplay,
-        awayTeamName: awayDisplay,
-      };
+        const spreadLine = deepSpreadLine(item) ?? payloadSpread;
+        const totalLine = deepTotalLine(item) ?? payloadTotal;
 
-      ml.push({
-        type: "ML",
-        confidence: baseConf,
-        provider: lineProvider,
-        game: gameMeta,
-        ui: {
-          pickSide: "HOME",
-          pickTeamId: homeTeamId,
-          pickTeamName: gameMeta.homeTeamName,
-        },
-        meta: { homeTeamId, awayTeamId },
-      });
+        if (isDefaultFallbackOdds(spreadLine ?? undefined, totalLine ?? undefined)) {
+          excludedFallback += 1;
+          continue;
+        }
 
-      spread.push({
-        type: "SPREAD",
-        confidence: clamp(baseConf - 3, 70, 90),
-        provider: lineProvider,
-        game: gameMeta,
-        ui: {
-          pickSide: "HOME",
-          pickTeamId: homeTeamId,
-          pickTeamName: gameMeta.homeTeamName,
-          pickLine: Number(spreadHome),
-        },
-        meta: { homeTeamId, awayTeamId },
-      });
+        if (type === "SPREAD" && spreadLine === null) {
+          excludedNoLine += 1;
+          continue;
+        }
+        if (type === "TOTAL" && totalLine === null) {
+          excludedNoLine += 1;
+          continue;
+        }
 
-      total.push({
-        type: "TOTAL",
-        confidence: clamp(baseConf - 5, 70, 85),
-        provider: lineProvider,
-        game: gameMeta,
-        ui: { pickTotal: "OVER", totalLine: Number(totalLine) },
-        meta: { homeTeamId, awayTeamId },
-      });
+        const normalized = {
+          ...item,
+          type,
+          provider,
+          game: item?.game ?? {
+            gameId: t.gameId,
+            date: dateKst,
+            homeTeamId: t.homeTeamId,
+            awayTeamId: t.awayTeamId,
+            homeTeamName: t.homeTeamName,
+            awayTeamName: t.awayTeamName,
+          },
+          ui: {
+            ...(item?.ui ?? {}),
+            ...(type === "SPREAD" ? { pickLine: Number(spreadLine) } : {}),
+            ...(type === "TOTAL" ? { totalLine: Number(totalLine) } : {}),
+          },
+        };
+
+        if (type === "ML") mlAll.push(normalized);
+        if (type === "SPREAD") spAll.push(normalized);
+        if (type === "TOTAL") ttAll.push(normalized);
+      }
     }
 
-    const top9 = [...ml.slice(0, 3), ...spread.slice(0, 3), ...total.slice(0, 3)];
+    const used = new Set<string>();
+    const ml3 = pickTop3DistinctByGame(mlAll, used);
+    const sp3 = pickTop3DistinctByGame(spAll, used);
+    const tt3 = pickTop3DistinctByGame(ttAll, used);
 
-    return NextResponse.json<ApiResp>({
+    const top9 = [...ml3, ...sp3, ...tt3];
+
+    return NextResponse.json({
       ok: true,
       result: {
         date: dateKst,
         totalGames: games.length,
         candidates: top9.length,
         top3: top9,
-        note: "자동 날짜: 오늘(분석 가능 있으면) / 없으면 내일. 승3 + 핸디3 + 언더오버3",
-        options: { provider: "MARKET_ODDS", mode: "9PICKS" },
-        oddsMeta: {
-          fetchedAt: oddsFetchedAt,
-          usage: oddsUsage,
-          ok: Boolean(oddsBuckets),
+        note:
+          "TOP3는 /api/pick POST 핸들러를 직접 호출해(재사용) ML/핸디/언오버를 추출. MODEL_SIMPLE/기본값(-2,218) 제외. 9개 모두 서로 다른 경기.",
+        meta: {
+          pickCalled,
+          pickOk,
+          mlFound: mlAll.length,
+          spFound: spAll.length,
+          ttFound: ttAll.length,
+          excludedPickFail,
+          excludedNoProvider,
+          excludedModelSimple,
+          excludedFallback,
+          excludedNoLine,
+          firstPickShape,
         },
       },
-    });
+    } satisfies ApiResp);
   } catch (e: any) {
-    return NextResponse.json<ApiResp>(
+    return NextResponse.json(
       { ok: false, error: String(e?.message ?? e) },
       { status: 500 }
     );

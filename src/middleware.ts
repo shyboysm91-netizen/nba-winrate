@@ -2,8 +2,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@supabase/ssr";
 
 function isPublicPath(pathname: string) {
-  // 로그인/인증 콜백은 항상 열어둠
-  if (pathname === "/login") return true;
+  // 로그인/회원가입/인증 콜백은 항상 열어둠
+  if (pathname === "/login" || pathname.startsWith("/login/")) return true;
+  if (pathname === "/signup" || pathname.startsWith("/signup/")) return true;
+  if (pathname === "/register" || pathname.startsWith("/register/")) return true;
   if (pathname.startsWith("/auth")) return true;
 
   // Next 내부/정적 파일
@@ -14,6 +16,13 @@ function isPublicPath(pathname: string) {
 }
 
 export async function middleware(req: NextRequest) {
+  const { pathname, search } = req.nextUrl;
+
+  // 정적/공개 경로는 바로 통과
+  if (isPublicPath(pathname)) {
+    return NextResponse.next();
+  }
+
   const res = NextResponse.next();
 
   const supabase = createServerClient(
@@ -33,26 +42,27 @@ export async function middleware(req: NextRequest) {
     }
   );
 
-  // ✅ 중요: 여기서 세션을 "갱신"해줘야 새로고침/이동 시 안정적임
   const {
     data: { user },
   } = await supabase.auth.getUser();
 
-  const { pathname } = req.nextUrl;
-
-  if (!user && !isPublicPath(pathname)) {
-    const loginUrl = req.nextUrl.clone();
-    loginUrl.pathname = "/login";
-    loginUrl.searchParams.set("next", pathname);
-    return NextResponse.redirect(loginUrl);
+  // ✅ API는 리다이렉트 금지 → 401 JSON
+  if (pathname.startsWith("/api")) {
+    if (!user) {
+      return NextResponse.json(
+        { ok: false, error: "로그인이 필요합니다." },
+        { status: 401 }
+      );
+    }
+    return res;
   }
 
-  // 로그인 상태인데 /login 들어오면 홈으로
-  if (user && pathname === "/login") {
-    const url = req.nextUrl.clone();
-    url.pathname = "/";
-    url.search = "";
-    return NextResponse.redirect(url);
+  // ✅ 페이지는 비로그인 차단 → /login 이동
+  if (!user) {
+    const loginUrl = req.nextUrl.clone();
+    loginUrl.pathname = "/login";
+    loginUrl.searchParams.set("next", `${pathname}${search || ""}`);
+    return NextResponse.redirect(loginUrl);
   }
 
   return res;
@@ -60,9 +70,7 @@ export async function middleware(req: NextRequest) {
 
 export const config = {
   matcher: [
-    /*
-      API/정적 제외하고 앱 라우트만 보호
-    */
-    "/((?!api|_next/static|_next/image|favicon.ico).*)",
+    // ✅ api 포함해서 세션 동기화
+    "/((?!_next/static|_next/image|favicon.ico).*)",
   ],
 };
