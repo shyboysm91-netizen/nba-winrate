@@ -1,9 +1,10 @@
+// src/app/api/pick/route.ts
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createServerClient } from "@supabase/ssr";
 
-import { fetchNBAGamesByKstDate } from "@/lib/nba/espn";
-import { fetchNbaOdds, type NormalizedOdds } from "@/lib/odds/theOddsApi";
+import { getOfficialGamesForDashboard } from "@/lib/nba/nbaOfficial";
+import { fetchNbaOdds } from "@/lib/odds/theOddsApi";
 
 type ApiResp =
   | { ok: true; result: any }
@@ -12,14 +13,11 @@ type ApiResp =
 function clamp(n: number, a: number, b: number) {
   return Math.max(a, Math.min(b, n));
 }
-
 function baseConfidence(totalGames: number) {
   if (totalGames >= 10) return 80;
   if (totalGames >= 7) return 75;
   return 70;
 }
-
-/** KST YYYYMMDD */
 function kstDateKeyNow() {
   const now = new Date();
   const s = new Intl.DateTimeFormat("en-CA", {
@@ -27,10 +25,25 @@ function kstDateKeyNow() {
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
-  }).format(now); // YYYY-MM-DD
+  }).format(now);
   return s.replaceAll("-", "");
 }
-
+function toYmdKST(date = new Date()) {
+  const kst = new Date(date.toLocaleString("en-US", { timeZone: "Asia/Seoul" }));
+  const y = kst.getFullYear();
+  const m = String(kst.getMonth() + 1).padStart(2, "0");
+  const d = String(kst.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+function normalizeDateParam(v: string) {
+  const raw = v.trim();
+  if (/^\d{8}$/.test(raw)) return `${raw.slice(0, 4)}-${raw.slice(4, 6)}-${raw.slice(6, 8)}`;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
+  return "";
+}
+function ymdToDateKey(ymd: string) {
+  return ymd.replaceAll("-", "");
+}
 function isProRow(row: any): boolean {
   if (!row) return false;
   if (typeof row.is_pro === "boolean") return row.is_pro;
@@ -41,14 +54,11 @@ function isProRow(row: any): boolean {
   return false;
 }
 
-/** ✅ TOP3 내부 호출 플래그 (FREE 1회 제한 bypass 용) */
 const INTERNAL_TOP3_HEADER = "x-internal-top3";
-
 function isInternalTop3(req: Request) {
   try {
     const h = req.headers.get(INTERNAL_TOP3_HEADER);
     if (h && String(h).trim() === "1") return true;
-
     const { searchParams } = new URL(req.url);
     const q = searchParams.get("internal");
     if (q && String(q).trim() === "1") return true;
@@ -56,57 +66,6 @@ function isInternalTop3(req: Request) {
   return false;
 }
 
-/** =========================
- * ✅ 초간단 인메모리 캐시 (서버리스 warm 인스턴스에서만 효과)
- * - games: 60초
- * - odds: 60초
- * ========================= */
-type CacheItem<T> = { exp: number; val: T };
-const gCache = globalThis as any;
-
-const GAMES_CACHE_KEY = "__NBA_GAMES_CACHE__";
-const ODDS_CACHE_KEY = "__NBA_ODDS_CACHE__";
-
-if (!gCache[GAMES_CACHE_KEY]) gCache[GAMES_CACHE_KEY] = new Map<string, CacheItem<any>>();
-if (!gCache[ODDS_CACHE_KEY]) gCache[ODDS_CACHE_KEY] = new Map<string, CacheItem<any>>();
-
-const gamesCache: Map<string, CacheItem<any>> = gCache[GAMES_CACHE_KEY];
-const oddsCache: Map<string, CacheItem<any>> = gCache[ODDS_CACHE_KEY];
-
-function cacheGet<T>(m: Map<string, CacheItem<T>>, key: string): T | null {
-  const hit = m.get(key);
-  if (!hit) return null;
-  if (Date.now() > hit.exp) {
-    m.delete(key);
-    return null;
-  }
-  return hit.val;
-}
-function cacheSet<T>(m: Map<string, CacheItem<T>>, key: string, val: T, ttlMs: number) {
-  m.set(key, { val, exp: Date.now() + ttlMs });
-}
-
-async function fetchGamesCached(date?: string) {
-  const key = `games:${date ?? "auto"}`;
-  const cached = cacheGet<any>(gamesCache, key);
-  if (cached) return cached;
-
-  const res = await fetchNBAGamesByKstDate(date);
-  cacheSet(gamesCache, key, res, 60 * 1000);
-  return res;
-}
-
-async function fetchOddsCached() {
-  const key = `odds:nba`;
-  const cached = cacheGet<NormalizedOdds>(oddsCache, key);
-  if (cached) return cached;
-
-  const res = await fetchNbaOdds({ useConsensus: false });
-  cacheSet(oddsCache, key, res, 60 * 1000);
-  return res;
-}
-
-/** ESPN triCode → The Odds API 팀명 */
 const TRI_TO_TEAM: Record<string, string> = {
   ATL: "Atlanta Hawks",
   BOS: "Boston Celtics",
@@ -149,43 +108,25 @@ function normTeamName(name: string): string {
     .replace(/\s+/g, " ")
     .trim();
 }
-
 function makeMatchKey(home: string, away: string): string {
   return `${normTeamName(home)}__${normTeamName(away)}`;
 }
-
 function parseMs(iso: string | null | undefined): number | null {
   if (!iso) return null;
   const t = Date.parse(iso);
   return Number.isFinite(t) ? t : null;
 }
-
-/**
- * ✅ FIX 1)
- * The Odds API 매칭은 "영문 풀팀명" 기준
- */
-function extractTeamsFromEspnGame(g: any): { home: string; away: string } {
-  const triHome = String(
-    g?.home?.triCode ?? g?.home?.abbr ?? g?.home?.abbreviation ?? ""
-  ).toUpperCase();
-  const triAway = String(
-    g?.away?.triCode ?? g?.away?.abbr ?? g?.away?.abbreviation ?? ""
-  ).toUpperCase();
+function extractTeamsFromEspnLikeGame(g: any): { home: string; away: string } {
+  const triHome = String(g?.home?.triCode ?? g?.home?.abbr ?? g?.home?.abbreviation ?? "").toUpperCase();
+  const triAway = String(g?.away?.triCode ?? g?.away?.abbr ?? g?.away?.abbreviation ?? "").toUpperCase();
 
   const homeFromTri = TRI_TO_TEAM[triHome];
   const awayFromTri = TRI_TO_TEAM[triAway];
 
   const homeNameFallback =
-    g?.homeTeam?.displayName ||
-    g?.homeTeam?.name ||
-    g?.home?.name ||
-    (triHome ? triHome : "");
-
+    g?.homeTeam?.displayName || g?.homeTeam?.name || g?.home?.name || (triHome ? triHome : "");
   const awayNameFallback =
-    g?.awayTeam?.displayName ||
-    g?.awayTeam?.name ||
-    g?.away?.name ||
-    (triAway ? triAway : "");
+    g?.awayTeam?.displayName || g?.awayTeam?.name || g?.away?.name || (triAway ? triAway : "");
 
   return {
     home: homeFromTri ?? String(homeNameFallback ?? ""),
@@ -193,29 +134,153 @@ function extractTeamsFromEspnGame(g: any): { home: string; away: string } {
   };
 }
 
+type NormalizedOdds = {
+  events: Array<{
+    homeTeam: string;
+    awayTeam: string;
+    commenceTime: string | null;
+    markets: {
+      spreads?: {
+        homePoint: number | null;
+        awayPoint: number | null;
+        provider: string | null;
+        sourceDetail?: string | null;
+      };
+      totals?: {
+        point: number | null;
+        provider: string | null;
+        sourceDetail?: string | null;
+      };
+    };
+    pickedBookmaker?: { key?: string; title?: string } | null;
+  }>;
+};
+
+function safeNum(v: any): number | null {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function readSpreadsFromEvent(ev: any) {
+  const home = String(ev?.home_team ?? "");
+  const away = String(ev?.away_team ?? "");
+  const bms: any[] = Array.isArray(ev?.bookmakers) ? ev.bookmakers : [];
+
+  // 1) REAL 우선: ESTIMATED 아닌 북메이커에서 spreads 먼저 찾기
+  const ordered = [
+    ...bms.filter((b) => String(b?.title ?? b?.key ?? "").toUpperCase() !== "ESTIMATED" && String(b?.key ?? "") !== "estimated"),
+    ...bms.filter((b) => String(b?.title ?? b?.key ?? "").toUpperCase() === "ESTIMATED" || String(b?.key ?? "") === "estimated"),
+  ];
+
+  for (const bm of ordered) {
+    const markets: any[] = Array.isArray(bm?.markets) ? bm.markets : [];
+    const m = markets.find((x) => x?.key === "spreads");
+    if (!m || !Array.isArray(m?.outcomes) || m.outcomes.length === 0) continue;
+
+    const oHome = m.outcomes.find((o: any) => String(o?.name ?? "") === home);
+    const oAway = m.outcomes.find((o: any) => String(o?.name ?? "") === away);
+
+    const homePoint = safeNum(oHome?.point);
+    const awayPoint = safeNum(oAway?.point);
+
+    if (homePoint === null && awayPoint === null) continue;
+
+    const provider = String(bm?.title ?? bm?.key ?? "") || null;
+    const sourceDetail =
+      (m?._meta?.provider === "ESTIMATED" ? String(m?._meta?.sourceDetail ?? "") : "") || null;
+
+    return {
+      homePoint,
+      awayPoint,
+      provider,
+      sourceDetail,
+      pickedBookmaker: { key: bm?.key, title: bm?.title },
+    };
+  }
+
+  return null;
+}
+
+function readTotalsFromEvent(ev: any) {
+  const bms: any[] = Array.isArray(ev?.bookmakers) ? ev.bookmakers : [];
+
+  const ordered = [
+    ...bms.filter((b) => String(b?.title ?? b?.key ?? "").toUpperCase() !== "ESTIMATED" && String(b?.key ?? "") !== "estimated"),
+    ...bms.filter((b) => String(b?.title ?? b?.key ?? "").toUpperCase() === "ESTIMATED" || String(b?.key ?? "") === "estimated"),
+  ];
+
+  for (const bm of ordered) {
+    const markets: any[] = Array.isArray(bm?.markets) ? bm.markets : [];
+    const m = markets.find((x) => x?.key === "totals");
+    if (!m || !Array.isArray(m?.outcomes) || m.outcomes.length === 0) continue;
+
+    const oOver = m.outcomes.find((o: any) => String(o?.name ?? "") === "Over");
+    const oUnder = m.outcomes.find((o: any) => String(o?.name ?? "") === "Under");
+    const point = safeNum(oOver?.point) ?? safeNum(oUnder?.point);
+
+    if (point === null) continue;
+
+    const provider = String(bm?.title ?? bm?.key ?? "") || null;
+    const sourceDetail =
+      (m?._meta?.provider === "ESTIMATED" ? String(m?._meta?.sourceDetail ?? "") : "") || null;
+
+    return {
+      point,
+      provider,
+      sourceDetail,
+      pickedBookmaker: { key: bm?.key, title: bm?.title },
+    };
+  }
+
+  return null;
+}
+
+function normalizeOdds(raw: any): NormalizedOdds {
+  const rawEvents: any[] = Array.isArray(raw?.events) ? raw.events : [];
+  const events = rawEvents.map((ev) => {
+    const homeTeam = String(ev?.home_team ?? "");
+    const awayTeam = String(ev?.away_team ?? "");
+    const commenceTime = (ev?.commence_time ?? ev?.commenceTime ?? null) ? String(ev?.commence_time ?? ev?.commenceTime) : null;
+
+    const sp = readSpreadsFromEvent(ev);
+    const tt = readTotalsFromEvent(ev);
+
+    const pickedBookmaker =
+      (sp?.pickedBookmaker ?? null) ||
+      (tt?.pickedBookmaker ?? null) ||
+      (ev?._oddsMeta?.provider ? { title: String(ev._oddsMeta.provider) } : null);
+
+    return {
+      homeTeam,
+      awayTeam,
+      commenceTime,
+      markets: {
+        spreads: sp
+          ? { homePoint: sp.homePoint, awayPoint: sp.awayPoint, provider: sp.provider, sourceDetail: sp.sourceDetail }
+          : undefined,
+        totals: tt ? { point: tt.point, provider: tt.provider, sourceDetail: tt.sourceDetail } : undefined,
+      },
+      pickedBookmaker,
+    };
+  });
+
+  return { events };
+}
+
 function buildOddsBuckets(odds: NormalizedOdds) {
   const buckets = new Map<string, NormalizedOdds["events"][number][]>();
-
   for (const e of odds.events) {
     const k1 = makeMatchKey(e.homeTeam, e.awayTeam);
     const k2 = makeMatchKey(e.awayTeam, e.homeTeam);
-
     if (!buckets.has(k1)) buckets.set(k1, []);
     buckets.get(k1)!.push(e);
-
     if (!buckets.has(k2)) buckets.set(k2, []);
     buckets.get(k2)!.push(e);
   }
-
   return buckets;
 }
-
-function pickClosestEvent(
-  candidates: NormalizedOdds["events"][number][],
-  startTimeUtcIso: string | null
-) {
+function pickClosestEvent(candidates: NormalizedOdds["events"][number][], startTimeUtcIso: string | null) {
   if (!candidates.length) return null;
-
   const startMs = parseMs(startTimeUtcIso);
   if (startMs === null) return candidates[0];
 
@@ -241,10 +306,7 @@ async function getSupabaseAuthClient() {
 
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-
-  if (!url || !anon) {
-    throw new Error("Missing NEXT_PUBLIC_SUPABASE_URL or NEXT_PUBLIC_SUPABASE_ANON_KEY");
-  }
+  if (!url || !anon) throw new Error("Missing NEXT_PUBLIC_SUPABASE_URL or NEXT_PUBLIC_SUPABASE_ANON_KEY");
 
   return createServerClient(url, anon, {
     cookies: {
@@ -267,29 +329,100 @@ async function getSupabaseAuthClient() {
   });
 }
 
+function getOfficialGameId(x: any): string {
+  return String(
+    x?.gameId ??
+      x?.id ??
+      x?.game_id ??
+      x?.gameCode ??
+      x?.gamecode ??
+      x?.gameCodeId ??
+      x?.gameCodeID ??
+      x?.gameKey ??
+      x?.game_key ??
+      ""
+  );
+}
+function getOfficialStartTimeUTC(x: any): string | null {
+  const iso =
+    x?.startTimeUTC ??
+    x?.startTimeUtc ??
+    x?.gameTimeUTC ??
+    x?.gameTimeUtc ??
+    x?.utcTime ??
+    x?.startTime ??
+    x?.dateTimeUTC ??
+    x?.gameDateTimeUTC ??
+    x?.gameDateTimeUtc ??
+    x?.commence_time ??
+    x?.commenceTime ??
+    null;
+
+  if (!iso) return null;
+  const ms = Date.parse(String(iso));
+  if (!Number.isFinite(ms)) return null;
+  return new Date(ms).toISOString();
+}
+function getOfficialTeam(side: "home" | "away", x: any) {
+  const t =
+    (side === "home" ? x?.home : x?.away) ??
+    (side === "home" ? x?.homeTeam : x?.awayTeam) ??
+    {};
+
+  const teamId = String(
+    t?.teamId ??
+      t?.id ??
+      t?.team_id ??
+      (side === "home" ? x?.homeTeamId : x?.awayTeamId) ??
+      ""
+  );
+
+  const triCode = String(
+    t?.triCode ??
+      t?.abbr ??
+      t?.abbreviation ??
+      t?.teamTricode ??
+      (side === "home" ? x?.homeTricode : x?.awayTricode) ??
+      ""
+  ).toUpperCase();
+
+  const name = String(
+    t?.displayName ??
+      t?.name ??
+      t?.teamName ??
+      (side === "home" ? x?.homeTeamName : x?.awayTeamName) ??
+      (triCode ? triCode : "")
+  );
+
+  return {
+    teamId: teamId || null,
+    id: teamId || null,
+    triCode: triCode || null,
+    abbr: triCode || null,
+    abbreviation: triCode || null,
+    name: name || null,
+    displayName: name || null,
+    logo: t?.logo ?? t?.teamLogo ?? null,
+  };
+}
+async function fetchOfficialGamesByDate(dateYmd: string) {
+  const rawGames: any[] = await getOfficialGamesForDashboard(dateYmd as any);
+  return Array.isArray(rawGames) ? rawGames : [];
+}
+
 export async function GET(req: Request) {
   try {
     const internalTop3 = isInternalTop3(req);
 
-    // ✅ 로그인 필수
     const supabaseAuth = await getSupabaseAuthClient();
     const {
       data: { user },
       error: userErr,
     } = await supabaseAuth.auth.getUser();
 
-    if (userErr) {
-      return NextResponse.json<ApiResp>({ ok: false, error: userErr.message }, { status: 401 });
-    }
+    if (userErr) return NextResponse.json<ApiResp>({ ok: false, error: userErr.message }, { status: 401 });
+    if (!user) return NextResponse.json<ApiResp>({ ok: false, error: "로그인이 필요합니다." }, { status: 401 });
 
-    if (!user) {
-      return NextResponse.json<ApiResp>(
-        { ok: false, error: "로그인이 필요합니다." },
-        { status: 401 }
-      );
-    }
-
-    // ✅ subscriptions
     const { data: sub, error: subErr } = await supabaseAuth
       .from("subscriptions")
       .select("*")
@@ -305,7 +438,6 @@ export async function GET(req: Request) {
 
     const isPro = isProRow(sub);
 
-    // ✅ FREE: KST 기준 하루 1경기 제한 (TOP3 내부 호출은 제외)
     if (!isPro && !internalTop3) {
       const dateKey = kstDateKeyNow();
 
@@ -323,21 +455,18 @@ export async function GET(req: Request) {
         );
       }
 
-      const used = (usage?.pick_count ?? 0) >= 1;
-      if (used) {
+      if ((usage?.pick_count ?? 0) >= 1) {
         return NextResponse.json<ApiResp>(
           { ok: false, error: "무료 사용자는 하루 1경기만 분석 가능합니다." },
           { status: 403 }
         );
       }
 
-      const nextCount = (usage?.pick_count ?? 0) + 1;
-
       const { error: upsertErr } = await supabaseAuth.from("daily_usage").upsert(
         {
           user_id: user.id,
           date_key: dateKey,
-          pick_count: nextCount,
+          pick_count: (usage?.pick_count ?? 0) + 1,
           updated_at: new Date().toISOString(),
         },
         { onConflict: "user_id,date_key" }
@@ -352,26 +481,43 @@ export async function GET(req: Request) {
     }
 
     const { searchParams } = new URL(req.url);
-    const date = searchParams.get("date") || undefined;
-    const gameId = searchParams.get("gameId") || "";
+    const dateParam = searchParams.get("date") || "";
+    const gameId = (searchParams.get("gameId") || "").trim();
 
-    if (!gameId.trim()) {
+    if (!gameId) return NextResponse.json<ApiResp>({ ok: false, error: "gameId가 필요합니다." }, { status: 400 });
+
+    const dateYmd = dateParam ? normalizeDateParam(dateParam) : toYmdKST();
+    if (!dateYmd) {
       return NextResponse.json<ApiResp>(
-        { ok: false, error: "gameId가 필요합니다." },
+        { ok: false, error: "Invalid date. Use YYYY-MM-DD or YYYYMMDD." },
         { status: 400 }
       );
     }
 
-    // ✅ games 캐시 사용
-    const { date: dateKst, games } = await fetchGamesCached(date);
+    const officialGames = await fetchOfficialGamesByDate(dateYmd);
+    let found = officialGames.find((x: any) => getOfficialGameId(x) === gameId);
 
-    const g = (games || []).find((x: any) => String(x?.gameId) === String(gameId));
-    if (!g) {
+    if (!found && dateYmd !== toYmdKST()) {
+      const retryGames = await fetchOfficialGamesByDate(toYmdKST());
+      found = retryGames.find((x: any) => getOfficialGameId(x) === gameId) ?? null;
+    }
+
+    if (!found) {
       return NextResponse.json<ApiResp>(
-        { ok: false, error: "해당 gameId의 경기를 찾지 못했습니다." },
+        { ok: false, error: "해당 gameId의 경기를 NBA 공식 일정에서 찾지 못했습니다." },
         { status: 404 }
       );
     }
+
+    const g = {
+      gameId,
+      startTimeUTC: getOfficialStartTimeUTC(found),
+      home: getOfficialTeam("home", found),
+      away: getOfficialTeam("away", found),
+      raw: found,
+    };
+
+    const dateKst = ymdToDateKey(dateYmd);
 
     const homeTeamId = String(g?.home?.teamId ?? g?.home?.id ?? "");
     const awayTeamId = String(g?.away?.teamId ?? g?.away?.id ?? "");
@@ -382,21 +528,21 @@ export async function GET(req: Request) {
     const homeName = g?.home?.name ?? TRI_TO_TEAM[triHome] ?? (triHome ? triHome : null);
     const awayName = g?.away?.name ?? TRI_TO_TEAM[triAway] ?? (triAway ? triAway : null);
 
-    const conf0 = baseConfidence((games || []).length);
+    const conf0 = baseConfidence((officialGames || []).length);
 
     let marketSpreadHome: number | null = null;
     let marketTotal: number | null = null;
     let marketProvider: string | null = null;
 
     try {
-      // ✅ odds 캐시 사용 (TOP3에서 pick 여러번 호출해도 60초 안에 1번만 호출됨)
-      const odds = await fetchOddsCached();
+      const rawOdds = await fetchNbaOdds();
+      const odds = normalizeOdds(rawOdds);
       const buckets = buildOddsBuckets(odds);
 
-      const { home, away } = extractTeamsFromEspnGame(g);
+      const { home, away } = extractTeamsFromEspnLikeGame(g);
       const key = makeMatchKey(home, away);
-      const candidates = buckets.get(key) ?? [];
 
+      const candidates = buckets.get(key) ?? [];
       const startIso =
         (g?.startTimeUTC as string | null) ??
         (g?.raw?.gameDateTimeUTC as string | null) ??
@@ -413,20 +559,24 @@ export async function GET(req: Request) {
         marketSpreadHome = typeof sp?.homePoint === "number" ? sp.homePoint : null;
         marketTotal = typeof tt?.point === "number" ? tt.point : null;
 
-        const pb: any = matched.pickedBookmaker ?? null;
-        marketProvider = (pb?.key ?? pb?.title ?? null) as string | null;
+        // ✅ provider 우선순위: spreads/totals 쪽 provider > pickedBookmaker
+        marketProvider =
+          (sp?.provider || null) ??
+          (tt?.provider || null) ??
+          ((matched.pickedBookmaker?.key ?? matched.pickedBookmaker?.title ?? null) as string | null);
       }
     } catch {}
 
+    // ✅ 최후 fallback도 "준배당" 기본값으로 의미 있게
     const spreadHome =
       typeof marketSpreadHome === "number" && Number.isFinite(marketSpreadHome)
         ? marketSpreadHome
-        : -2;
+        : -2.5;
 
     const totalLine =
       typeof marketTotal === "number" && Number.isFinite(marketTotal)
         ? marketTotal
-        : 218;
+        : 224;
 
     const lineProvider = marketProvider ?? "MODEL_SIMPLE";
 
@@ -435,14 +585,7 @@ export async function GET(req: Request) {
         type: "ML",
         confidence: conf0,
         provider: lineProvider,
-        game: {
-          gameId,
-          date: dateKst,
-          homeTeamId,
-          awayTeamId,
-          homeTeamName: homeName,
-          awayTeamName: awayName,
-        },
+        game: { gameId, date: dateKst, homeTeamId, awayTeamId, homeTeamName: homeName, awayTeamName: awayName },
         ui: { pickSide: "HOME", pickTeamId: homeTeamId, pickTeamName: homeName },
         meta: { homeTeamId, awayTeamId },
       },
@@ -450,34 +593,15 @@ export async function GET(req: Request) {
         type: "SPREAD",
         confidence: clamp(conf0 - 3, 70, 90),
         provider: lineProvider,
-        game: {
-          gameId,
-          date: dateKst,
-          homeTeamId,
-          awayTeamId,
-          homeTeamName: homeName,
-          awayTeamName: awayName,
-        },
-        ui: {
-          pickSide: "HOME",
-          pickTeamId: homeTeamId,
-          pickTeamName: homeName,
-          pickLine: Number(spreadHome),
-        },
+        game: { gameId, date: dateKst, homeTeamId, awayTeamId, homeTeamName: homeName, awayTeamName: awayName },
+        ui: { pickSide: "HOME", pickTeamId: homeTeamId, pickTeamName: homeName, pickLine: Number(spreadHome) },
         meta: { homeTeamId, awayTeamId },
       },
       {
         type: "TOTAL",
         confidence: clamp(conf0 - 5, 70, 85),
         provider: lineProvider,
-        game: {
-          gameId,
-          date: dateKst,
-          homeTeamId,
-          awayTeamId,
-          homeTeamName: homeName,
-          awayTeamName: awayName,
-        },
+        game: { gameId, date: dateKst, homeTeamId, awayTeamId, homeTeamName: homeName, awayTeamName: awayName },
         ui: { pickTotal: "OVER", totalLine: Number(totalLine) },
         meta: { homeTeamId, awayTeamId },
       },
@@ -488,37 +612,27 @@ export async function GET(req: Request) {
       result: {
         date: dateKst,
         gameId,
-        spreadHome: marketSpreadHome,
-        total: marketTotal,
-        provider: marketProvider,
+        spreadHome,
+        total: totalLine,
+        provider: lineProvider,
         picks,
+        game: g,
       },
     });
   } catch (e: any) {
-    return NextResponse.json<ApiResp>(
-      { ok: false, error: String(e?.message ?? e) },
-      { status: 500 }
-    );
+    return NextResponse.json<ApiResp>({ ok: false, error: String(e?.message ?? e) }, { status: 500 });
   }
 }
 
-/* =========================
-   🔥 POST 어댑터 (GET 그대로 재사용)
-   - JSON body 없어도 동작 (쿼리 fallback)
-   - TOP3 내부 호출 헤더 추가
-   ========================= */
 export async function POST(req: Request) {
   const url = new URL(req.url);
-
   const body = await req.json().catch(() => null);
+
   const gameId = body?.gameId ?? url.searchParams.get("gameId");
   const date = body?.date ?? url.searchParams.get("date");
 
   if (!gameId) {
-    return NextResponse.json<ApiResp>(
-      { ok: false, error: "gameId가 필요합니다." },
-      { status: 400 }
-    );
+    return NextResponse.json<ApiResp>({ ok: false, error: "gameId가 필요합니다." }, { status: 400 });
   }
 
   url.searchParams.set("gameId", String(gameId));
@@ -527,10 +641,6 @@ export async function POST(req: Request) {
   const headers = new Headers(req.headers);
   headers.set(INTERNAL_TOP3_HEADER, "1");
 
-  const getReq = new Request(url.toString(), {
-    method: "GET",
-    headers,
-  });
-
+  const getReq = new Request(url.toString(), { method: "GET", headers });
   return GET(getReq);
 }

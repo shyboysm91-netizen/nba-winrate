@@ -14,13 +14,26 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+    /* ✅ 여기 색만 원하는 어두운 톤으로 */
+    --background: #0e1117;
+    --foreground: #e5e7eb;
   }
 }
 
+/* ✅ 배경 “진짜 화면 전체”에 강제 적용 (배열/정렬 건드림 0) */
+html,
 body {
-  background: var(--background);
+  height: 100%;
+  background: var(--background) !important;
   color: var(--foreground);
+}
+
+/* ✅ App Router 최상위 래퍼가 bg-white로 덮는 경우가 많아서 같이 강제 */
+body > div:first-child {
+  min-height: 100vh;
+  background: var(--background) !important;
+}
+
+body {
   font-family: Arial, Helvetica, sans-serif;
 }

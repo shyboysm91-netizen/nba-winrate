@@ -13,8 +13,8 @@ type GamesResponse = { ok: boolean; date?: string; games?: any[]; error?: string
 
 function Card({ title, children }: { title: string; children: ReactNode }) {
   return (
-    <div className="rounded-2xl border border-neutral-200 bg-white p-5">
-      <div className="font-semibold">{title}</div>
+    <div className="rounded-2xl border border-neutral-800 bg-neutral-900 p-5 text-neutral-100">
+      <div className="font-semibold text-white">{title}</div>
       <div className="mt-3">{children}</div>
     </div>
   );
@@ -51,7 +51,7 @@ function getMarketProvider(g: any): string | null {
 export default function Dashboard({ isPaid }: Props) {
   const locked = !isPaid;
   const commonLockUI = (
-    <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+    <div className="rounded-xl border border-amber-400/30 bg-amber-500/10 p-4 text-sm text-amber-200">
       무료 상태라서 이 기능은 잠금이야. (유료 활성화 필요)
     </div>
   );
@@ -165,7 +165,7 @@ export default function Dashboard({ isPaid }: Props) {
 
     return (
       <div className="mt-4 space-y-2">
-        <div className="text-xs text-neutral-500">
+        <div className="text-xs text-neutral-400">
           date: {data.date} / games: {data.games.length}
         </div>
 
@@ -187,17 +187,17 @@ export default function Dashboard({ isPaid }: Props) {
           const marketProvider = getMarketProvider(g);
 
           return (
-            <div key={gameId} className="rounded-xl border border-neutral-200 p-3">
+            <div key={gameId} className="rounded-xl border border-neutral-800 bg-neutral-950/40 p-3">
               <div className="flex items-center justify-between gap-3">
-                <div className="font-semibold">
+                <div className="font-semibold text-neutral-100">
                   {awayName} vs {homeName}
                 </div>
-                <div className="text-xs text-neutral-500">
+                <div className="text-xs text-neutral-400">
                   {g.state ?? g.status ?? "-"} / {g.statusText ?? "-"}
                 </div>
               </div>
 
-              <div className="mt-2 flex gap-2 text-xs text-neutral-600 flex-wrap">
+              <div className="mt-2 flex gap-2 text-xs text-neutral-300 flex-wrap">
                 <Pill>spreadHome: {marketSpreadHome ?? "null"}</Pill>
                 <Pill>total: {marketTotal ?? "null"}</Pill>
                 <Pill>provider: {marketProvider ?? "null"}</Pill>
@@ -208,13 +208,13 @@ export default function Dashboard({ isPaid }: Props) {
                   <button
                     onClick={() => fetchPick(targetDate, gameId)}
                     disabled={pickLoading}
-                    className="rounded-xl bg-neutral-900 text-white px-4 py-2 text-sm font-medium disabled:opacity-50"
+                    className="rounded-xl bg-white text-neutral-900 px-4 py-2 text-sm font-medium disabled:opacity-50"
                   >
                     {pickLoading ? "분석 중..." : "이 경기 분석/픽 만들기"}
                   </button>
 
                   {pickErr ? (
-                    <div className="mt-3 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-800">
+                    <div className="mt-3 rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-200">
                       {pickErr}
                     </div>
                   ) : null}
@@ -237,18 +237,22 @@ export default function Dashboard({ isPaid }: Props) {
 
   return (
     <div className="mt-6 space-y-4">
-      <div className="rounded-2xl border border-neutral-200 bg-white p-5">
+      {/* 컨트롤 */}
+      <div className="rounded-2xl border border-neutral-800 bg-neutral-900 p-5 text-neutral-100">
         <div className="flex items-center gap-3">
-          <div className="font-semibold">컨트롤</div>
+          <div className="font-semibold text-white">컨트롤</div>
           <div className="ml-auto flex items-center gap-2">
-            <label className="text-xs text-neutral-600">TOP3 날짜(YYYYMMDD)</label>
+            <label className="text-xs text-neutral-300">TOP3 날짜(YYYYMMDD)</label>
             <input
               value={date}
               onChange={(e) => setDate(e.target.value)}
-              className="w-[140px] rounded-xl border border-neutral-200 bg-white px-3 py-2 text-sm outline-none focus:border-neutral-400"
+              className="w-[140px] rounded-xl border border-neutral-700 bg-neutral-950 px-3 py-2 text-sm text-neutral-100 outline-none placeholder:text-neutral-500 focus:border-neutral-500"
               placeholder={tomorrowDate}
             />
-            <button onClick={() => setDate(tomorrowDate)} className="rounded-xl border border-neutral-200 bg-white px-3 py-2 text-sm">
+            <button
+              onClick={() => setDate(tomorrowDate)}
+              className="rounded-xl border border-neutral-700 bg-neutral-950 px-3 py-2 text-sm text-neutral-200 hover:bg-neutral-900"
+            >
               내일로
             </button>
             <Pill>API: /api/games /api/top3 /api/pick</Pill>
@@ -264,7 +268,9 @@ export default function Dashboard({ isPaid }: Props) {
               key={t.key}
               onClick={() => setTab(t.key)}
               className={`rounded-xl px-4 py-2 text-sm font-medium border ${
-                tab === t.key ? "bg-neutral-900 text-white border-neutral-900" : "bg-white text-neutral-900 border-neutral-200"
+                tab === t.key
+                  ? "bg-white text-neutral-900 border-white"
+                  : "bg-neutral-950 text-neutral-200 border-neutral-700 hover:bg-neutral-900"
               }`}
             >
               {t.label}
@@ -279,35 +285,37 @@ export default function Dashboard({ isPaid }: Props) {
             commonLockUI
           ) : (
             <div className="space-y-6">
-              <div className="rounded-2xl border border-neutral-200 bg-white p-4">
+              <div className="rounded-2xl border border-neutral-800 bg-neutral-950/30 p-4">
                 <div className="flex items-center justify-between gap-3">
                   <div>
-                    <div className="font-semibold">오늘 경기</div>
-                    <div className="text-xs text-neutral-500">date: {todayDate}</div>
+                    <div className="font-semibold text-white">오늘 경기</div>
+                    <div className="text-xs text-neutral-400">date: {todayDate}</div>
                   </div>
                   <button
                     onClick={fetchToday}
                     disabled={todayLoading}
-                    className="rounded-xl bg-neutral-900 text-white px-4 py-2 text-sm font-medium disabled:opacity-50"
+                    className="rounded-xl bg-white text-neutral-900 px-4 py-2 text-sm font-medium disabled:opacity-50"
                   >
                     {todayLoading ? "불러오는 중..." : "오늘 경기 불러오기"}
                   </button>
                 </div>
 
                 {todayError ? (
-                  <div className="mt-3 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-800">{todayError}</div>
+                  <div className="mt-3 rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-200">
+                    {todayError}
+                  </div>
                 ) : null}
 
                 {renderGames(todayData, todayDate)}
 
                 {todayFallbackToTomorrow ? (
-                  <div className="mt-4 rounded-2xl border border-neutral-200 bg-neutral-50 p-4">
-                    <div className="font-semibold text-neutral-900">
+                  <div className="mt-4 rounded-2xl border border-neutral-800 bg-neutral-950/40 p-4">
+                    <div className="font-semibold text-neutral-100">
                       오늘에 분석 가능한 경기(시작 전/진행중)가 없어서, 내일 경기를 자동으로 보여줍니다.
                     </div>
-                    <div className="mt-1 text-xs text-neutral-600">date: {tomorrowDate}</div>
+                    <div className="mt-1 text-xs text-neutral-400">date: {tomorrowDate}</div>
                     {tomorrowError ? (
-                      <div className="mt-3 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-800">
+                      <div className="mt-3 rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-200">
                         {tomorrowError}
                       </div>
                     ) : null}
@@ -316,23 +324,25 @@ export default function Dashboard({ isPaid }: Props) {
                 ) : null}
               </div>
 
-              <div className="rounded-2xl border border-neutral-200 bg-white p-4">
+              <div className="rounded-2xl border border-neutral-800 bg-neutral-950/30 p-4">
                 <div className="flex items-center justify-between gap-3">
                   <div>
-                    <div className="font-semibold">내일 경기</div>
-                    <div className="text-xs text-neutral-500">date: {tomorrowDate}</div>
+                    <div className="font-semibold text-white">내일 경기</div>
+                    <div className="text-xs text-neutral-400">date: {tomorrowDate}</div>
                   </div>
                   <button
                     onClick={fetchTomorrow}
                     disabled={tomorrowLoading}
-                    className="rounded-xl bg-neutral-900 text-white px-4 py-2 text-sm font-medium disabled:opacity-50"
+                    className="rounded-xl bg-white text-neutral-900 px-4 py-2 text-sm font-medium disabled:opacity-50"
                   >
                     {tomorrowLoading ? "불러오는 중..." : "내일 경기 불러오기"}
                   </button>
                 </div>
 
                 {tomorrowError ? (
-                  <div className="mt-3 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-800">{tomorrowError}</div>
+                  <div className="mt-3 rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-200">
+                    {tomorrowError}
+                  </div>
                 ) : null}
 
                 {renderGames(tomorrowData, tomorrowDate)}
@@ -352,24 +362,28 @@ export default function Dashboard({ isPaid }: Props) {
                 <button
                   onClick={fetchTop3}
                   disabled={top3Loading}
-                  className="rounded-xl bg-neutral-900 text-white px-4 py-2 text-sm font-medium disabled:opacity-50"
+                  className="rounded-xl bg-white text-neutral-900 px-4 py-2 text-sm font-medium disabled:opacity-50"
                 >
                   {top3Loading ? "불러오는 중..." : "TOP3 불러오기"}
                 </button>
               </div>
 
               {top3Error ? (
-                <div className="mt-3 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-800">{top3Error}</div>
+                <div className="mt-3 rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-200">
+                  {top3Error}
+                </div>
               ) : null}
 
               {top3Data?.result ? (
                 <div className="mt-4 space-y-5">
-                  <div className="text-xs text-neutral-500">
+                  <div className="text-xs text-neutral-400">
                     date: {top3Data.result.date} / totalGames: {top3Data.result.totalGames} / candidates: {top3Data.result.candidates}
                   </div>
 
                   {top3Data.result.top3.length === 0 ? (
-                    <div className="rounded-xl border border-neutral-200 bg-neutral-50 p-4 text-sm text-neutral-800">TOP3가 비어있어.</div>
+                    <div className="rounded-xl border border-neutral-800 bg-neutral-950/40 p-4 text-sm text-neutral-200">
+                      TOP3가 비어있어.
+                    </div>
                   ) : (
                     (() => {
                       const all = top3Data.result.top3 || [];
@@ -387,7 +401,7 @@ export default function Dashboard({ isPaid }: Props) {
                         <div className="space-y-6">
                           {sections.map((sec) => (
                             <div key={sec.title} className="space-y-3">
-                              <div className="text-sm font-semibold text-neutral-900">{sec.title}</div>
+                              <div className="text-sm font-semibold text-neutral-100">{sec.title}</div>
                               <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
                                 {sec.items.map((p: any, idx: number) => (
                                   <PickCard key={`${sec.title}-${p?.game?.gameId}-${idx}`} p={p} />

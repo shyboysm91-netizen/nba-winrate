@@ -16,46 +16,112 @@ function toYmdKST(date = new Date()) {
 
 function normalizeDateParam(v: string) {
   const raw = v.trim();
-  if (/^\d{8}$/.test(raw)) return `${raw.slice(0, 4)}-${raw.slice(4, 6)}-${raw.slice(6, 8)}`;
+  if (/^\d{8}$/.test(raw))
+    return `${raw.slice(0, 4)}-${raw.slice(4, 6)}-${raw.slice(6, 8)}`;
   if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
   return "";
 }
 
 function pickName(team: any) {
-  return team?.displayName || team?.shortDisplayName || team?.name || team?.abbreviation || null;
+  return (
+    team?.displayName ||
+    team?.shortDisplayName ||
+    team?.name ||
+    team?.abbreviation ||
+    null
+  );
 }
 
-/** ✅ 배포(Vercel) 환경 감지 */
-function isVercelProd() {
-  // Vercel에서 자동으로 들어가는 env
-  return process.env.VERCEL === "1" || !!process.env.VERCEL_URL;
+/* =========================
+   ✅ NBA OFFICIAL 정규화 helpers
+   - pick API와 gameId를 "같은 규칙"으로 맞추는게 핵심
+   ========================= */
+function getGameIdOfficial(g: any): string {
+  return String(
+    g?.gameId ??
+      g?.id ??
+      g?.game_id ??
+      g?.gameCode ??
+      g?.gamecode ??
+      g?.gameCodeId ??
+      g?.gameCodeID ??
+      g?.gameKey ??
+      g?.game_key ??
+      ""
+  );
 }
 
-/** =========================
- * ✅ 초간단 캐시(60초)
- * ========================= */
-type CacheItem<T> = { exp: number; val: T };
-const g = globalThis as any;
-const CACHE_KEY = "__NBA_GAMES_ROUTE_CACHE__";
-if (!g[CACHE_KEY]) g[CACHE_KEY] = new Map<string, CacheItem<any>>();
-const cache: Map<string, CacheItem<any>> = g[CACHE_KEY];
+function getStartTimeUTCOfficial(g: any): string | null {
+  const iso =
+    g?.startTimeUTC ??
+    g?.startTimeUtc ??
+    g?.gameTimeUTC ??
+    g?.gameTimeUtc ??
+    g?.utcTime ??
+    g?.commence_time ??
+    g?.commenceTime ??
+    g?.startTime ??
+    g?.dateTimeUTC ??
+    g?.gameDateTimeUTC ??
+    g?.gameDateTimeUtc ??
+    null;
 
-function cacheGet<T>(key: string): T | null {
-  const hit = cache.get(key);
-  if (!hit) return null;
-  if (Date.now() > hit.exp) {
-    cache.delete(key);
-    return null;
-  }
-  return hit.val as T;
-}
-function cacheSet<T>(key: string, val: T, ttlMs: number) {
-  cache.set(key, { val, exp: Date.now() + ttlMs });
+  if (!iso) return null;
+  const ms = Date.parse(String(iso));
+  if (!Number.isFinite(ms)) return null;
+  return new Date(ms).toISOString();
 }
 
-function withCacheHeaders(resp: NextResponse) {
-  resp.headers.set("Cache-Control", "public, s-maxage=60, stale-while-revalidate=300");
-  return resp;
+function getSideTeamOfficial(side: "home" | "away", g: any) {
+  const t =
+    (side === "home" ? g?.home : g?.away) ??
+    (side === "home" ? g?.homeTeam : g?.awayTeam) ??
+    {};
+
+  const teamId = String(
+    t?.teamId ??
+      t?.id ??
+      t?.team_id ??
+      (side === "home" ? g?.homeTeamId : g?.awayTeamId) ??
+      ""
+  );
+
+  const triCode = String(
+    t?.triCode ??
+      t?.abbr ??
+      t?.abbreviation ??
+      t?.teamTricode ??
+      (side === "home" ? g?.homeTricode : g?.awayTricode) ??
+      ""
+  ).toUpperCase();
+
+  const name = String(
+    t?.displayName ??
+      t?.name ??
+      t?.teamName ??
+      (side === "home" ? g?.homeTeamName : g?.awayTeamName) ??
+      (triCode ? triCode : "")
+  );
+
+  return {
+    teamId: teamId || null,
+    id: teamId || null,
+    name: name || null,
+    abbr: triCode || null,
+    triCode: triCode || null,
+    logo: t?.logo ?? t?.teamLogo ?? null,
+  };
+}
+
+function getStatusOfficial(g: any) {
+  return String(
+    g?.status ??
+      g?.gameStatus ??
+      g?.gameStatusText ??
+      g?.state ??
+      g?.gameState ??
+      "SCHEDULED"
+  );
 }
 
 export async function GET(req: Request) {
@@ -71,27 +137,44 @@ export async function GET(req: Request) {
       );
     }
 
-    // ✅ 캐시
-    const cacheKey = `games:${date}:${isVercelProd() ? "vercel" : "local"}`;
-    const cached = cacheGet<any>(cacheKey);
-    if (cached) return withCacheHeaders(NextResponse.json(cached));
+    // ✅ 1순위: NBA 공식 일정
+    try {
+      const rawGames: any[] = await getOfficialGamesForDashboard(date);
 
-    const useEspnOnly = isVercelProd();
+      // ✅ 핵심: 공식 일정도 반드시 gameId를 확정해서 내려줌 (pick과 동일 매칭)
+      const games = (rawGames || [])
+        .map((g) => {
+          const gameId = getGameIdOfficial(g);
+          if (!gameId) return null;
 
-    // ✅ 로컬에서는 nbaOfficial 우선 (원래대로)
-    if (!useEspnOnly) {
-      try {
-        const games = await getOfficialGamesForDashboard(date);
-        const payload = { ok: true, date, count: games.length, games, source: "nbaOfficial" };
-        cacheSet(cacheKey, payload, 60 * 1000);
-        return withCacheHeaders(NextResponse.json(payload));
-      } catch (e: any) {
-        const msg = String(e?.message ?? e);
-        console.error("[games] nba official failed -> fallback espn:", msg);
-      }
+          const home = getSideTeamOfficial("home", g);
+          const away = getSideTeamOfficial("away", g);
+
+          return {
+            gameId,
+            id: gameId, // UI 호환
+            startTimeUTC: getStartTimeUTCOfficial(g),
+            state: getStatusOfficial(g),
+            status: getStatusOfficial(g),
+            statusText: g?.statusText ?? g?.gameStatusText ?? "",
+            date,
+            home,
+            away,
+            // odds 칸이 있으면 UI에 그대로 표시될 수 있게 유지 (없으면 null)
+            odds: g?.odds ?? null,
+            raw: g,
+          };
+        })
+        .filter(Boolean);
+
+      return NextResponse.json({ ok: true, date, count: games.length, games });
+    } catch (e: any) {
+      // 공식쪽이 깨져도 서비스가 멈추면 안 되니 ESPN으로 fallback
+      const msg = String(e?.message ?? e);
+      console.error("[games] nba official failed -> fallback espn:", msg);
     }
 
-    // ✅ 배포(Vercel)에서는 ESPN만 사용 (안정)
+    // ✅ 2순위: ESPN fallback (기존 너 로직 유지용)
     const rawGames: any[] = await getEspnScoreboard(date);
 
     const games = rawGames.map((g) => {
@@ -138,8 +221,8 @@ export async function GET(req: Request) {
       };
 
       const kstText = g?.dateKST && g?.timeKST ? `${g.dateKST} ${g.timeKST} KST` : "";
-      const gameId = String(g?.gameId ?? g?.id ?? "");
 
+      const gameId = String(g?.gameId ?? g?.id ?? "");
       return {
         gameId,
         id: gameId,
@@ -154,9 +237,7 @@ export async function GET(req: Request) {
       };
     });
 
-    const payload = { ok: true, date, count: games.length, games, source: "espn" };
-    cacheSet(cacheKey, payload, 60 * 1000);
-    return withCacheHeaders(NextResponse.json(payload));
+    return NextResponse.json({ ok: true, date, count: games.length, games });
   } catch (e: any) {
     return NextResponse.json(
       { ok: false, error: e?.message ?? "Unknown error" },
